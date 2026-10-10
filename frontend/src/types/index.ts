@@ -1,0 +1,246 @@
+export interface Organization {
+  id: number;
+  name: string;
+  type: string;
+  code?: string;
+  description?: string;
+  settings_json?: Record<string, any>;
+  created_at?: string;
+}
+
+export interface PresetOrg {
+  type: string;
+  name: string;
+  icon: string;
+  description: string;
+  default_departments: string[];
+  default_roles: string[];
+  profession_label: string;
+  resource_types: string[];
+  default_working_days_schedule?: Record<string, any>;
+  default_profession_settings?: Record<string, any>;
+}
+
+export interface Department {
+  id: number;
+  org_id: number;
+  name: string;
+  code?: string;
+}
+
+export interface User {
+  id: number;
+  email: string;
+  full_name: string;
+  role: 'admin' | 'manager' | 'employee';
+  org_id?: number;
+  person_id?: number;
+}
+
+export interface SkillItem {
+  name: string;
+  level: string;
+  verified: boolean;
+  years: number;
+}
+
+export interface InferredSkillItem {
+  name: string;
+  confidence: number;
+  category?: string;
+  source_skill?: string;
+  reason?: string;
+}
+
+export interface Person {
+  id: number;
+  org_id: number;
+  department_id?: number;
+  department_name?: string;
+  name: string;
+  email: string;
+  phone?: string;
+  role_title?: string;
+  employee_code: string;
+  profession_type?: string;
+  qualifications: string[];
+  skills: SkillItem[];
+  inferred_skills: InferredSkillItem[];
+  preferences: Record<string, any>;
+  profession_metadata: Record<string, any>;
+  max_hours_per_week: number;
+  data_quality_score: number;
+  status: 'active' | 'inactive' | 'on_leave';
+  hire_date?: string;
+}
+
+export interface Resource {
+  id: number;
+  org_id: number;
+  name: string;
+  type: string;
+  capacity: number;
+  location?: string;
+  status: string;
+}
+
+export interface TimetableSlot {
+  slot_id: number;
+  title: string;
+  date_str?: string;
+  day_of_week: number;
+  start_time: string;
+  end_time: string;
+  resource_id?: number;
+  resource_name?: string;
+  department_id?: number;
+  department_name?: string;
+  required_skills: string[];
+  required_qualifications: string[];
+  profession_metadata: Record<string, any>;
+  assignment_id?: number;
+  person_id?: number;
+  person_name?: string;
+  person_role?: string;
+  is_replacement?: boolean;
+  replacement_type?: string;
+  replacement_reason?: string;
+  original_person_id?: number;
+  original_person_name?: string;
+  status: string;
+  period_type?: string;
+  staffing_status?: string;
+  is_locked?: boolean;
+  min_staff?: number;
+  target_staff?: number;
+  max_staff?: number;
+  slot_order?: number;
+  assigned_count?: number;
+  assigned_staff?: any[];
+}
+
+export interface Schedule {
+  id: number;
+  org_id: number;
+  title: string;
+  period_start: string;
+  period_end: string;
+  status: string;
+  version: number;
+  fairness_score: number;
+  total_assignments: number;
+  conflict_count: number;
+  created_at: string;
+}
+
+export interface ActiveReplacement {
+  id: number;
+  assignment_id: number;
+  slot_title: string;
+  date_str: string;
+  time_window: string;
+  original_person_id: number;
+  original_person_name: string;
+  replacement_person_id: number;
+  replacement_person_name: string;
+  replacement_type: string;
+  reason: string;
+  match_score: number;
+  created_at: string;
+  can_restore: boolean;
+}
+
+export interface LeaveRequest {
+  id: number;
+  person_id: number;
+  person_name?: string;
+  leave_type: string;
+  start_date: string;
+  end_date: string;
+  start_time: string;
+  end_time: string;
+  reason: string;
+  status: string;
+  affected_slots_count: number;
+  replacement_search_started: boolean;
+  return_confirmed: boolean;
+  created_at: string;
+}
+
+export interface SearchCandidate {
+  person: Person;
+  match_percentage: number;
+  score_components: {
+    skill_match: number;
+    qualification_match: number;
+    availability_match: number;
+    experience_match: number;
+    text_similarity: number;
+  };
+  explanations: string[];
+  missing_requirements: string[];
+  rejection_reasons: string[];
+  is_recommended: boolean;
+}
+
+export interface AppNotification {
+  id: number;
+  title: string;
+  message: string;
+  category: string;
+  is_read: boolean;
+  link_url?: string;
+  created_at: string;
+}
+
+export interface Holiday {
+  id: number;
+  org_id: number;
+  department_id?: number;
+  department_name?: string;
+  name: string;
+  holiday_type: 'public' | 'regional' | 'organization' | 'department_specific' | 'optional' | 'custom' | 'emergency_closure' | 'special_working_day';
+  start_date: string;
+  end_date: string;
+  is_partial_day: boolean;
+  partial_start_time?: string;
+  partial_end_time?: string;
+  is_recurring: boolean;
+  location?: string;
+  description?: string;
+  essential_staffing_allowed: boolean;
+  authorized_roles: string[];
+  status: string;
+  exceptions_count?: number;
+  created_at?: string;
+}
+
+export interface HolidayException {
+  id: number;
+  holiday_id: number;
+  person_id: number;
+  person_name?: string;
+  slot_id?: number;
+  reason: string;
+  authorized_by: string;
+  created_at?: string;
+}
+
+export interface HolidayImpactItem {
+  slot_id: number;
+  slot_title: string;
+  date_str: string;
+  start_time: string;
+  end_time: string;
+  department_id?: number;
+  assignment_id?: number;
+  person_id?: number;
+  person_name?: string;
+  person_role?: string;
+  status_tag: 'conflict' | 'essential_clearance' | 'authorized_exception' | 'special_working_day';
+  has_exception: boolean;
+  is_essential_covered: boolean;
+  holiday_name: string;
+  holiday_type: string;
+}
+
