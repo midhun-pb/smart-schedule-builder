@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: smart-schedule-builder
+    runtime: docker
+    plan: free
+    region: oregon
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: SECRET_KEY
+        generateValue: true
