@@ -2,6 +2,8 @@
 
 A complete, production-grade full-stack web application designed with an **Apple-inspired Liquid Glass** UI aesthetic. Smart Schedule Builder provides constraint-based automated timetable optimization (using **Google OR-Tools CP-SAT**), natural language information retrieval (NLP/TF-IDF), full emergency absence & replacement lifecycles, and workload fairness distribution across 15 organization types.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/midhun-pb/smart-schedule-builder)
+
 ---
 
 ## 🌟 Key Features
