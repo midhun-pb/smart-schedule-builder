@@ -55,6 +55,7 @@ app.include_router(api_settings.router, prefix=settings.API_V1_STR)
 app.include_router(holidays.router, prefix=settings.API_V1_STR)
 
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import os
 
 @app.get("/api/health")
@@ -67,8 +68,21 @@ def api_health():
     }
 
 frontend_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../frontend/dist"))
+
+class SPAStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as ex:
+            if ex.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise ex
+        if response.status_code == 404:
+            return await super().get_response("index.html", scope)
+        return response
+
 if os.path.exists(frontend_dist):
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="static")
+    app.mount("/", SPAStaticFiles(directory=frontend_dist, html=True), name="static")
 else:
     @app.get("/")
     def root():

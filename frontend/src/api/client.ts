@@ -1,6 +1,4 @@
-const API_BASE = (typeof window !== 'undefined' && window.location.hostname === 'localhost' && window.location.port === '5173')
-  ? '/api'
-  : ((import.meta as any).env?.VITE_API_BASE || 'http://localhost:8000/api');
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || '/api';
 
 class ApiClient {
   private getToken(): string | null {

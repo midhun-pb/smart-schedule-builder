@@ -519,7 +519,7 @@ export const ProfilesModule: React.FC = () => {
               </div>
 
               <a
-                href="http://localhost:8000/api/data-import/template"
+                href="/api/data-import/template"
                 download="staff_import_template.csv"
                 className="px-3.5 py-2 rounded-xl glass-pill hover:bg-white/60 dark:hover:bg-slate-800/60 text-xs font-semibold flex items-center gap-1.5 text-blue-600 dark:text-blue-400"
               >
