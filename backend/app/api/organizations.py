@@ -3,8 +3,12 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 import datetime
 from app.core.database import get_db
-from app.models.models import Organization, Department, ShiftTemplate, Resource, Schedule, RequirementSlot, User, AuditLog
-from app.schemas.schemas import OrganizationCreate, OrganizationResponse
+from app.models.models import Organization, Department, ShiftTemplate, Resource, Schedule, RequirementSlot, User, AuditLog, Subject, Person
+from app.schemas.schemas import (
+    OrganizationCreate, OrganizationResponse,
+    DepartmentCreate, DepartmentUpdate, DepartmentResponse,
+    SubjectCreate, SubjectUpdate, SubjectResponse
+)
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
@@ -224,6 +228,262 @@ def list_organization_departments(org_id: int, db: Session = Depends(get_db)):
         }
         for d in depts
     ]
+
+@router.post("/{org_id}/departments")
+def create_department(org_id: int, payload: DepartmentCreate, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    clean_name = payload.name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Department name is required")
+
+    clean_code = (payload.code.strip() if payload.code else clean_name[:4].upper()).replace(" ", "")
+    dept = Department(
+        org_id=org_id,
+        name=clean_name,
+        code=clean_code,
+        description=payload.description or ""
+    )
+    db.add(dept)
+    db.commit()
+    db.refresh(dept)
+    return {
+        "id": dept.id,
+        "org_id": dept.org_id,
+        "name": dept.name,
+        "code": dept.code,
+        "description": dept.description
+    }
+
+@router.put("/{org_id}/departments/{dept_id}")
+def update_department(org_id: int, dept_id: int, payload: DepartmentUpdate, db: Session = Depends(get_db)):
+    dept = db.query(Department).filter(Department.id == dept_id, Department.org_id == org_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+
+    if payload.name is not None and payload.name.strip():
+        dept.name = payload.name.strip()
+    if payload.code is not None and payload.code.strip():
+        dept.code = payload.code.strip()
+    if payload.description is not None:
+        dept.description = payload.description.strip()
+
+    db.commit()
+    return {
+        "id": dept.id,
+        "org_id": dept.org_id,
+        "name": dept.name,
+        "code": dept.code,
+        "description": dept.description
+    }
+
+@router.delete("/{org_id}/departments/{dept_id}")
+def delete_department(org_id: int, dept_id: int, db: Session = Depends(get_db)):
+    dept = db.query(Department).filter(Department.id == dept_id, Department.org_id == org_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+
+    db.delete(dept)
+    db.commit()
+    return {"success": True, "message": "Department deleted"}
+
+# --- Subject Management Endpoints ---
+
+@router.get("/{org_id}/subjects")
+def list_organization_subjects(
+    org_id: int,
+    department_id: Optional[int] = None,
+    semester: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(Subject).filter(Subject.org_id == org_id)
+    if department_id:
+        query = query.filter(Subject.department_id == department_id)
+    if semester:
+        query = query.filter(Subject.semester == semester)
+    subjects = query.order_by(Subject.name.asc()).all()
+    
+    dept_map = {d.id: d.name for d in db.query(Department).filter(Department.org_id == org_id).all()}
+    return [
+        {
+            "id": s.id,
+            "org_id": s.org_id,
+            "department_id": s.department_id,
+            "department_name": dept_map.get(s.department_id, "General"),
+            "name": s.name,
+            "code": s.code,
+            "semester": s.semester,
+            "class_name": s.class_name,
+            "required_hours_per_week": s.required_hours_per_week,
+            "is_lab": s.is_lab,
+            "description": s.description,
+            "created_at": s.created_at.isoformat() if s.created_at else None
+        }
+        for s in subjects
+    ]
+
+@router.post("/{org_id}/subjects")
+def create_subject(org_id: int, payload: SubjectCreate, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    clean_name = payload.name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Subject name is required")
+
+    clean_code = (payload.code.strip() if payload.code else clean_name[:4].upper()).replace(" ", "")
+
+    sub = Subject(
+        org_id=org_id,
+        department_id=payload.department_id,
+        name=clean_name,
+        code=clean_code,
+        semester=payload.semester.strip() if payload.semester else None,
+        class_name=payload.class_name.strip() if payload.class_name else None,
+        required_hours_per_week=payload.required_hours_per_week or 4.0,
+        is_lab=bool(payload.is_lab),
+        description=payload.description or ""
+    )
+    db.add(sub)
+    db.commit()
+    db.refresh(sub)
+    return {
+        "id": sub.id,
+        "org_id": sub.org_id,
+        "department_id": sub.department_id,
+        "name": sub.name,
+        "code": sub.code,
+        "semester": sub.semester,
+        "class_name": sub.class_name,
+        "required_hours_per_week": sub.required_hours_per_week,
+        "is_lab": sub.is_lab,
+        "description": sub.description
+    }
+
+@router.put("/{org_id}/subjects/{subject_id}")
+def update_subject(org_id: int, subject_id: int, payload: SubjectUpdate, db: Session = Depends(get_db)):
+    sub = db.query(Subject).filter(Subject.id == subject_id, Subject.org_id == org_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    if payload.name is not None and payload.name.strip():
+        sub.name = payload.name.strip()
+    if payload.code is not None and payload.code.strip():
+        sub.code = payload.code.strip()
+    if payload.department_id is not None:
+        sub.department_id = payload.department_id
+    if payload.semester is not None:
+        sub.semester = payload.semester.strip()
+    if payload.class_name is not None:
+        sub.class_name = payload.class_name.strip()
+    if payload.required_hours_per_week is not None:
+        sub.required_hours_per_week = payload.required_hours_per_week
+    if payload.is_lab is not None:
+        sub.is_lab = payload.is_lab
+    if payload.description is not None:
+        sub.description = payload.description.strip()
+
+    db.commit()
+    return {
+        "id": sub.id,
+        "org_id": sub.org_id,
+        "department_id": sub.department_id,
+        "name": sub.name,
+        "code": sub.code,
+        "semester": sub.semester,
+        "class_name": sub.class_name,
+        "required_hours_per_week": sub.required_hours_per_week,
+        "is_lab": sub.is_lab,
+        "description": sub.description
+    }
+
+@router.delete("/{org_id}/subjects/{subject_id}")
+def delete_subject(org_id: int, subject_id: int, db: Session = Depends(get_db)):
+    sub = db.query(Subject).filter(Subject.id == subject_id, Subject.org_id == org_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    db.delete(sub)
+    db.commit()
+    return {"success": True, "message": "Subject deleted"}
+
+# --- Roster Readiness Checklist ---
+
+@router.get("/{org_id}/roster-readiness")
+def get_roster_readiness(org_id: int, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    people_count = db.query(Person).filter(Person.org_id == org_id, Person.status == "active").count()
+    dept_count = db.query(Department).filter(Department.org_id == org_id).count()
+    subjects_count = db.query(Subject).filter(Subject.org_id == org_id).count()
+
+    settings = org.settings_json or {}
+    sched_config = settings.get("working_days_schedule", {})
+    working_days_count = sum(1 for d in sched_config.values() if d.get("is_working_day"))
+    total_periods_count = sum(len(d.get("periods", [])) for d in sched_config.values() if d.get("is_working_day"))
+
+    latest_sched = db.query(Schedule).filter(Schedule.org_id == org_id).order_by(Schedule.created_at.desc()).first()
+    slots_count = 0
+    if latest_sched:
+        slots_count = db.query(RequirementSlot).filter(RequirementSlot.schedule_id == latest_sched.id).count()
+
+    checklist = [
+        {
+            "key": "organization",
+            "title": "Organization Configured",
+            "is_ready": bool(org.name and org.type),
+            "details": f"{org.name} ({org.type.capitalize()})"
+        },
+        {
+            "key": "departments",
+            "title": "Departments & Teams",
+            "is_ready": dept_count > 0,
+            "details": f"{dept_count} department(s) created" if dept_count > 0 else "No departments added yet"
+        },
+        {
+            "key": "staff",
+            "title": "Faculty / Teachers Added" if org.type in ["college", "university"] else "Employees Added",
+            "is_ready": people_count > 0,
+            "details": f"{people_count} active staff member(s)" if people_count > 0 else "No staff members registered"
+        },
+        {
+            "key": "subjects_duties",
+            "title": "Subjects & Curriculum Configured" if org.type in ["college", "university"] else "Duties & Roles Defined",
+            "is_ready": (subjects_count > 0) if org.type in ["college", "university"] else True,
+            "details": f"{subjects_count} subject(s) configured" if org.type in ["college", "university"] else "Operating duties mapped"
+        },
+        {
+            "key": "working_hours",
+            "title": "Working Hours & Schedule Rules",
+            "is_ready": working_days_count > 0 and total_periods_count > 0,
+            "details": f"{working_days_count} active working days, {total_periods_count} duty/shift periods"
+        },
+        {
+            "key": "timetable_slots",
+            "title": "Timetable Structure Provisioned",
+            "is_ready": slots_count > 0 or total_periods_count > 0,
+            "details": f"{slots_count} timetable slots ready for assignment" if slots_count > 0 else "Will be auto-generated from schedule periods"
+        }
+    ]
+
+    can_generate = people_count > 0 and working_days_count > 0 and total_periods_count > 0
+    missing_items = [item["title"] for item in checklist if not item["is_ready"]]
+
+    return {
+        "org_id": org.id,
+        "org_type": org.type,
+        "can_generate": can_generate,
+        "checklist": checklist,
+        "missing_items": missing_items,
+        "latest_schedule_id": latest_sched.id if latest_sched else None,
+        "setup_step": settings.get("setup_step", 6 if can_generate else 1),
+        "setup_completed": settings.get("setup_completed", False)
+    }
 
 @router.get("/{org_id}/resources")
 def list_organization_resources(org_id: int, db: Session = Depends(get_db)):

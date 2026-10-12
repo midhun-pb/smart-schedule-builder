@@ -7,7 +7,7 @@ from app.core.security import hash_password
 from app.models.models import (
     Organization, Department, User, Person, Resource, ShiftTemplate,
     RequirementSlot, Schedule, Assignment, LeaveRequest, Notification, AuditLog, Holiday,
-    ScheduleVersion
+    ScheduleVersion, Subject
 )
 from app.api import (
     auth, organizations, profiles, data_import, schedules, search,
@@ -16,6 +16,16 @@ from app.api import (
 )
 from app.services.scheduling_engine import SchedulingEngine
 from app.services.skill_engine import SkillEngine
+
+from sqlalchemy import text
+
+# Safe schema migrations for existing SQLite database
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE requirement_slots ADD COLUMN subject_id INTEGER"))
+        conn.commit()
+except Exception:
+    pass
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -462,7 +472,52 @@ def seed_database():
     finally:
         db.close()
 
+def seed_subjects_if_needed():
+    db = SessionLocal()
+    try:
+        colleges = db.query(Organization).filter(Organization.type.in_(["college", "university"])).all()
+        for col in colleges:
+            if db.query(Subject).filter(Subject.org_id == col.id).count() == 0:
+                cse_dept = db.query(Department).filter(Department.org_id == col.id, Department.code == "CSE").first()
+                c_id = cse_dept.id if cse_dept else None
+                default_subs = [
+                    ("Database Management Systems", "CS301", "S5", "CSE-A", 4.0, False, "Core relational databases, SQL, and normalization."),
+                    ("Data Structures & Algorithms", "CS201", "S3", "CSE-A", 4.0, False, "Linear & non-linear structures, algorithmic complexity."),
+                    ("Computer Networks", "CS302", "S5", "CSE-B", 4.0, False, "OSI stack, TCP/IP routing, network security."),
+                    ("Artificial Intelligence & ML", "CS401", "S7", "CSE-A", 4.0, False, "Search heuristics, supervised learning, neural nets."),
+                    ("Operating Systems", "CS303", "S5", "CSE-A", 4.0, False, "Kernel architectures, concurrency, memory paging."),
+                    ("Python Programming Lab", "CS202L", "S3", "CSE-B", 2.0, True, "Hands-on scripting, data pipelines, automation."),
+                    ("Database Systems Practical Lab", "CS304L", "S5", "CSE-A", 2.0, True, "Practical PostgreSQL query tuning and transactions.")
+                ]
+                for name, code, sem, cname, hrs, is_lab, desc in default_subs:
+                    sub = Subject(
+                        org_id=col.id,
+                        department_id=c_id,
+                        name=name,
+                        code=code,
+                        semester=sem,
+                        class_name=cname,
+                        required_hours_per_week=hrs,
+                        is_lab=is_lab,
+                        description=desc
+                    )
+                    db.add(sub)
+                db.commit()
+
+                # Link existing slots to subjects if matched
+                subs = db.query(Subject).filter(Subject.org_id == col.id).all()
+                slots = db.query(RequirementSlot).filter(RequirementSlot.org_id == col.id).all()
+                for sl in slots:
+                    for s in subs:
+                        if s.name.lower() in sl.title.lower() or (sl.profession_metadata and sl.profession_metadata.get("subject", "").lower() in s.name.lower()):
+                            sl.subject_id = s.id
+                            break
+                db.commit()
+    finally:
+        db.close()
+
 # Run seed on application startup
 @app.on_event("startup")
 def on_startup():
     seed_database()
+    seed_subjects_if_needed()

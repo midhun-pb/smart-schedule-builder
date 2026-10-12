@@ -60,6 +60,31 @@ class ApiClient {
     this.request<any>(`/organizations/${id}`, { method: 'PUT', body: JSON.stringify(data) });
   getDepartments = (orgId: number) =>
     this.request<any[]>(`/organizations/${orgId}/departments`);
+  createDepartment = (orgId: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/departments`, { method: 'POST', body: JSON.stringify(data) });
+  updateDepartment = (orgId: number, deptId: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/departments/${deptId}`, { method: 'PUT', body: JSON.stringify(data) });
+  deleteDepartment = (orgId: number, deptId: number) =>
+    this.request<any>(`/organizations/${orgId}/departments/${deptId}`, { method: 'DELETE' });
+
+  // Subjects
+  getSubjects = (orgId: number, params?: { department_id?: number; semester?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.department_id) query.append('department_id', String(params.department_id));
+    if (params?.semester) query.append('semester', params.semester);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    return this.request<any[]>(`/organizations/${orgId}/subjects${qs}`);
+  };
+  createSubject = (orgId: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/subjects`, { method: 'POST', body: JSON.stringify(data) });
+  updateSubject = (orgId: number, subjectId: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/subjects/${subjectId}`, { method: 'PUT', body: JSON.stringify(data) });
+  deleteSubject = (orgId: number, subjectId: number) =>
+    this.request<any>(`/organizations/${orgId}/subjects/${subjectId}`, { method: 'DELETE' });
+
+  // Roster Readiness
+  getRosterReadiness = (orgId: number) =>
+    this.request<any>(`/organizations/${orgId}/roster-readiness`);
 
   // Profiles
   getPeople = (params: { org_id: number; department_id?: number; search?: string }) => {

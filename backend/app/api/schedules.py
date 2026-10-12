@@ -30,6 +30,7 @@ def list_schedules(org_id: int, db: Session = Depends(get_db)):
     return schedules
 
 @router.get("/{schedule_id}")
+@router.get("/{schedule_id}/details")
 def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
     sched = db.query(Schedule).filter(Schedule.id == schedule_id).first()
     if not sched:
@@ -92,9 +93,25 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
         else:
             staffing_status = "adequate"
 
+        # Determine subject name for slot
+        subject_name = None
+        if getattr(s, "subject_id", None) and getattr(s, "subject", None):
+            subject_name = s.subject.name
+        elif s.profession_metadata and s.profession_metadata.get("subject"):
+            subject_name = s.profession_metadata.get("subject")
+        elif s.title and (" Lecture" in s.title or " Lab" in s.title):
+            subject_name = s.title.split("(")[0].replace(" Lecture", "").replace(" Lab", "").strip()
+
+        org_type = sched.organization.type if sched.organization else ""
+        if not subject_name and p_type == "work" and org_type in ["college", "university"]:
+            subject_name = "Subject not assigned"
+
         slot_cards.append({
             "slot_id": s.id,
             "title": s.title,
+            "subject": subject_name,
+            "subject_name": subject_name,
+            "subject_id": getattr(s, "subject_id", None),
             "date_str": s.date_str,
             "day_of_week": s.day_of_week,
             "start_time": s.start_time,
@@ -143,13 +160,13 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
             "holiday_type": h.holiday_type,
             "start_date": h.start_date,
             "end_date": h.end_date,
-            "is_emergency_closure": h.is_emergency_closure,
-            "is_special_working_day": h.is_special_working_day,
-            "is_partial_day": h.is_partial_day,
-            "partial_start_time": h.partial_start_time,
-            "partial_end_time": h.partial_end_time,
-            "department_id": h.department_id,
-            "requires_continuous_ops": h.requires_continuous_ops
+            "is_emergency_closure": getattr(h, "is_emergency_closure", h.holiday_type == "emergency_closure"),
+            "is_special_working_day": getattr(h, "is_special_working_day", h.holiday_type == "special_working_day"),
+            "is_partial_day": getattr(h, "is_partial_day", False),
+            "partial_start_time": getattr(h, "partial_start_time", None),
+            "partial_end_time": getattr(h, "partial_end_time", None),
+            "department_id": getattr(h, "department_id", None),
+            "requires_continuous_ops": getattr(h, "requires_continuous_ops", getattr(h, "essential_staffing_allowed", False))
         }
         for h in holidays
     ]
@@ -189,6 +206,10 @@ def create_slot(slot_data: SlotCreate, db: Session = Depends(get_db)):
         sched_id = slot_data.schedule_id
         org_id = sched.org_id if sched else (slot_data.org_id or 1)
 
+    meta = dict(slot_data.profession_metadata or {})
+    if slot_data.subject_name:
+        meta["subject"] = slot_data.subject_name
+
     new_slot = RequirementSlot(
         org_id=org_id,
         schedule_id=sched_id,
@@ -199,10 +220,11 @@ def create_slot(slot_data: SlotCreate, db: Session = Depends(get_db)):
         end_time=slot_data.end_time,
         department_id=slot_data.department_id,
         resource_id=slot_data.resource_id,
-        required_skills=slot_data.required_skills,
+        subject_id=slot_data.subject_id,
+        required_skills=slot_data.required_skills or ([slot_data.subject_name] if slot_data.subject_name else []),
         required_qualifications=slot_data.required_qualifications,
         min_experience_years=slot_data.min_experience_years,
-        profession_metadata=slot_data.profession_metadata,
+        profession_metadata=meta,
         min_staff=slot_data.min_staff,
         target_staff=slot_data.target_staff,
         max_staff=slot_data.max_staff,
@@ -228,13 +250,26 @@ def create_slot(slot_data: SlotCreate, db: Session = Depends(get_db)):
         )
         db.add(assign)
         db.commit()
-
-    return {"success": True, "slot": new_slot}
+    return {
+        "success": True,
+        "id": new_slot.id,
+        "slot": {
+            "id": new_slot.id,
+            "schedule_id": new_slot.schedule_id,
+            "title": new_slot.title,
+            "day_of_week": new_slot.day_of_week,
+            "start_time": new_slot.start_time,
+            "end_time": new_slot.end_time,
+            "period_type": new_slot.period_type,
+            "subject_id": new_slot.subject_id,
+            "profession_metadata": new_slot.profession_metadata
+        }
+    }
 
 @router.put("/slots/{slot_id}")
 def update_slot(slot_id: int, payload: SlotUpdate, db: Session = Depends(get_db)):
     """
-    Edits custom slot parameters (title, times, min/target/max staff, skills, lock).
+    Edits custom slot parameters (title, times, min/target/max staff, skills, lock, subject).
     """
     slot = db.query(RequirementSlot).filter(RequirementSlot.id == slot_id).first()
     if not slot:
@@ -248,8 +283,16 @@ def update_slot(slot_id: int, payload: SlotUpdate, db: Session = Depends(get_db)
             raise HTTPException(status_code=400, detail=time_msg)
 
     update_data = payload.dict(exclude_unset=True)
+    if "subject_name" in update_data and update_data["subject_name"]:
+        meta = dict(slot.profession_metadata or {})
+        meta["subject"] = update_data["subject_name"]
+        slot.profession_metadata = meta
+        if not slot.required_skills or slot.required_skills == ["Any Subject"]:
+            slot.required_skills = [update_data["subject_name"]]
+
     for field, value in update_data.items():
-        setattr(slot, field, value)
+        if field != "subject_name":
+            setattr(slot, field, value)
 
     # Also update associated assignments time if changed
     if payload.start_time or payload.end_time or payload.date_str:

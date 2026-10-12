@@ -17,6 +17,9 @@ import {
   Bell,
   Sliders,
   X,
+  ChevronDown,
+  ChevronRight,
+  Layers,
 } from 'lucide-react';
 import { triggerHaptic } from '../../utils/haptics';
 
@@ -28,23 +31,26 @@ interface NavItem {
   adminOnly?: boolean;
 }
 
-const NAV_ITEMS: NavItem[] = [
+const CORE_ITEMS: NavItem[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { key: 'schedule', label: 'Timetable & Roster', icon: CalendarDays },
+  { key: 'profiles', label: 'Employees & Teachers', icon: Users },
   { key: 'org-setup', label: 'Organization Setup', icon: Building },
-  { key: 'profiles', label: 'Profiles & Import', icon: Users },
-  { key: 'schedule', label: 'Schedule & Timetable', icon: CalendarDays },
-  { key: 'search', label: 'Intelligent Search', icon: Sparkles, badge: 'IR/NLP' },
-  { key: 'replacements', label: 'Swaps & Replacements', icon: RefreshCw },
-  { key: 'leave', label: 'Availability & Leave', icon: Clock },
-  { key: 'intelligence', label: 'Skill Intelligence', icon: Brain },
-  { key: 'fairness', label: 'Fairness & Workload', icon: Scale },
+  { key: 'fairness', label: 'Workload & Fairness', icon: Scale },
   { key: 'issues', label: 'Schedule Issues', icon: AlertTriangle },
-  { key: 'team-builder', label: 'Team Builder', icon: Users2 },
-  { key: 'analytics', label: 'Analytics', icon: BarChart3 },
-  { key: 'holidays', label: 'Holiday Management', icon: CalendarDays },
-  { key: 'history', label: 'History & Rollback', icon: History },
   { key: 'notifications', label: 'Notifications', icon: Bell },
   { key: 'settings', label: 'Settings', icon: Sliders },
+];
+
+const ADVANCED_ITEMS: NavItem[] = [
+  { key: 'replacements', label: 'Swaps & Replacements', icon: RefreshCw },
+  { key: 'search', label: 'Intelligent Search', icon: Sparkles, badge: 'IR/NLP' },
+  { key: 'leave', label: 'Availability & Leave', icon: Clock },
+  { key: 'intelligence', label: 'Skill Intelligence', icon: Brain },
+  { key: 'team-builder', label: 'Team Builder', icon: Users2 },
+  { key: 'holidays', label: 'Holiday Management', icon: CalendarDays },
+  { key: 'analytics', label: 'Analytics & Reports', icon: BarChart3 },
+  { key: 'history', label: 'History & Rollback', icon: History },
 ];
 
 export const Sidebar: React.FC<{
@@ -52,6 +58,14 @@ export const Sidebar: React.FC<{
   onCloseMobile: () => void;
 }> = ({ isOpenMobile, onCloseMobile }) => {
   const { activeTab, setActiveTab, unreadCount, currentUser } = useApp();
+  const isCurrentTabAdvanced = ADVANCED_ITEMS.some((i) => i.key === activeTab);
+  const [showAdvanced, setShowAdvanced] = React.useState<boolean>(isCurrentTabAdvanced);
+
+  React.useEffect(() => {
+    if (isCurrentTabAdvanced) {
+      setShowAdvanced(true);
+    }
+  }, [isCurrentTabAdvanced]);
 
   const handleSelect = (key: string) => {
     triggerHaptic(12);
@@ -94,10 +108,10 @@ export const Sidebar: React.FC<{
         {/* Navigation List */}
         <div className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
           <div className="px-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-            Navigation Modules
+            Core Workflow
           </div>
 
-          {NAV_ITEMS.map((item) => {
+          {CORE_ITEMS.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.key;
             const isNotif = item.key === 'notifications' && unreadCount > 0;
@@ -136,6 +150,68 @@ export const Sidebar: React.FC<{
               </button>
             );
           })}
+
+          {/* Advanced Operations Collapsible Section */}
+          <div className="pt-3">
+            <button
+              onClick={() => {
+                triggerHaptic(8);
+                setShowAdvanced(!showAdvanced);
+              }}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-[11px] font-bold uppercase tracking-wider text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100/50 dark:hover:bg-slate-800/40 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <Layers className="w-3.5 h-3.5 text-indigo-500" />
+                <span>Advanced Operations</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-200/60 dark:bg-slate-800 text-slate-500">
+                  {ADVANCED_ITEMS.length}
+                </span>
+                {showAdvanced ? (
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                )}
+              </div>
+            </button>
+
+            {showAdvanced && (
+              <div className="mt-1 space-y-1 pl-1 border-l-2 border-indigo-500/20 ml-2 animate-in fade-in slide-in-from-top-1 duration-200">
+                {ADVANCED_ITEMS.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = activeTab === item.key;
+
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => handleSelect(item.key)}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all group ${
+                        isActive
+                          ? 'bg-indigo-600/90 text-white shadow-md shadow-indigo-500/25 backdrop-blur-md'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-white/50 dark:hover:bg-slate-800/50 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Icon
+                          className={`w-3.5 h-3.5 transition-transform group-hover:scale-110 ${
+                            isActive ? 'text-white' : 'text-slate-500 dark:text-slate-400 group-hover:text-indigo-500'
+                          }`}
+                        />
+                        <span>{item.label}</span>
+                      </div>
+
+                      {item.badge && !isActive && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-semibold border border-indigo-500/20">
+                          {item.badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* User Card at bottom of sidebar */}

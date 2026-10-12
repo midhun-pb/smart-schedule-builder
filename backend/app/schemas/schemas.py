@@ -50,11 +50,47 @@ class DepartmentBase(BaseModel):
     description: Optional[str] = None
 
 class DepartmentCreate(DepartmentBase):
-    org_id: int
+    org_id: Optional[int] = None
+
+class DepartmentUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    description: Optional[str] = None
 
 class DepartmentResponse(DepartmentBase):
     id: int
     org_id: int
+    class Config:
+        from_attributes = True
+
+# Subject
+class SubjectBase(BaseModel):
+    name: str
+    code: str
+    department_id: Optional[int] = None
+    semester: Optional[str] = None
+    class_name: Optional[str] = None
+    required_hours_per_week: float = 4.0
+    is_lab: bool = False
+    description: Optional[str] = None
+
+class SubjectCreate(SubjectBase):
+    org_id: Optional[int] = None
+
+class SubjectUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    department_id: Optional[int] = None
+    semester: Optional[str] = None
+    class_name: Optional[str] = None
+    required_hours_per_week: Optional[float] = None
+    is_lab: Optional[bool] = None
+    description: Optional[str] = None
+
+class SubjectResponse(SubjectBase):
+    id: int
+    org_id: int
+    created_at: Optional[datetime] = None
     class Config:
         from_attributes = True
 
@@ -121,6 +157,8 @@ class SlotCreate(BaseModel):
     end_time: str
     department_id: Optional[int] = None
     resource_id: Optional[int] = None
+    subject_id: Optional[int] = None
+    subject_name: Optional[str] = None
     required_skills: List[str] = []
     required_qualifications: List[str] = []
     min_experience_years: float = 0.0
@@ -140,6 +178,8 @@ class SlotUpdate(BaseModel):
     end_time: Optional[str] = None
     department_id: Optional[int] = None
     resource_id: Optional[int] = None
+    subject_id: Optional[int] = None
+    subject_name: Optional[str] = None
     required_skills: Optional[List[str]] = None
     required_qualifications: Optional[List[str]] = None
     profession_metadata: Optional[Dict[str, Any]] = None

@@ -23,6 +23,7 @@ class Organization(Base):
     resources = relationship("Resource", back_populates="organization", cascade="all, delete-orphan")
     schedules = relationship("Schedule", back_populates="organization", cascade="all, delete-orphan")
     holidays = relationship("Holiday", back_populates="organization", cascade="all, delete-orphan")
+    subjects = relationship("Subject", back_populates="organization", cascade="all, delete-orphan")
 
 
 class Department(Base):
@@ -36,6 +37,25 @@ class Department(Base):
 
     organization = relationship("Organization", back_populates="departments")
     people = relationship("Person", back_populates="department")
+
+
+class Subject(Base):
+    __tablename__ = "subjects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    name = Column(String(150), nullable=False)
+    code = Column(String(50), nullable=False)
+    semester = Column(String(20), nullable=True)  # e.g., "S5"
+    class_name = Column(String(50), nullable=True)  # e.g., "CSE-A"
+    required_hours_per_week = Column(Float, default=4.0)
+    is_lab = Column(Boolean, default=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+
+    organization = relationship("Organization", back_populates="subjects")
+    department = relationship("Department")
 
 
 class User(Base):
@@ -148,6 +168,7 @@ class RequirementSlot(Base):
     schedule_id = Column(Integer, ForeignKey("schedules.id", ondelete="CASCADE"), nullable=True)
     department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
     resource_id = Column(Integer, ForeignKey("resources.id", ondelete="SET NULL"), nullable=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="SET NULL"), nullable=True)
     
     title = Column(String(200), nullable=False)  # "DBMS Lecture", "Emergency Ward Shift"
     date_str = Column(String(20), nullable=True)  # "2026-10-12"
@@ -171,6 +192,7 @@ class RequirementSlot(Base):
     schedule = relationship("Schedule", back_populates="slots")
     department = relationship("Department")
     resource = relationship("Resource")
+    subject = relationship("Subject")
     assignments = relationship("Assignment", back_populates="slot", cascade="all, delete-orphan")
 
     @property

@@ -26,6 +26,22 @@ export interface Department {
   org_id: number;
   name: string;
   code?: string;
+  description?: string;
+}
+
+export interface Subject {
+  id: number;
+  org_id: number;
+  department_id?: number;
+  department_name?: string;
+  name: string;
+  code: string;
+  semester?: string;
+  class_name?: string;
+  required_hours_per_week?: number;
+  is_lab?: boolean;
+  description?: string;
+  created_at?: string;
 }
 
 export interface User {
@@ -95,6 +111,9 @@ export interface TimetableSlot {
   resource_name?: string;
   department_id?: number;
   department_name?: string;
+  subject_id?: number;
+  subject?: string;
+  subject_name?: string;
   required_skills: string[];
   required_qualifications: string[];
   profession_metadata: Record<string, any>;
