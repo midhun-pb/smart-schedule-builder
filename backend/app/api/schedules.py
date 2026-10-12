@@ -6,7 +6,7 @@ from app.core.database import get_db
 from app.models.models import (
     Organization, Schedule, RequirementSlot, Assignment, Person, Resource,
     Department, LeaveRequest, ScheduleVersion, AuditLog, Notification,
-    Holiday, HolidayException
+    Holiday, HolidayException, Subject, Semester, TeacherSubjectAssignment
 )
 from app.schemas.schemas import (
     ScheduleGenerateRequest, SlotCreate, SlotUpdate,
@@ -44,9 +44,12 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
     )
     assignments = db.query(Assignment).filter(Assignment.schedule_id == schedule_id).all()
     
-    # Pre-map person details
+    # Pre-map person and entity details
     people = {p.id: p for p in db.query(Person).filter(Person.org_id == sched.org_id).all()}
     resources = {r.id: r for r in db.query(Resource).filter(Resource.org_id == sched.org_id).all()}
+    departments = {d.id: d for d in db.query(Department).filter(Department.org_id == sched.org_id).all()}
+    subjects = {sub.id: sub for sub in db.query(Subject).filter(Subject.org_id == sched.org_id).all()}
+    semesters = {sem.id: sem for sem in db.query(Semester).filter(Semester.org_id == sched.org_id).all()}
 
     # Group assignments by slot_id to support multi-staff requirements
     assignments_by_slot: Dict[int, List[Assignment]] = {}
@@ -93,14 +96,46 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
         else:
             staffing_status = "adequate"
 
-        # Determine subject name for slot
-        subject_name = None
-        if getattr(s, "subject_id", None) and getattr(s, "subject", None):
-            subject_name = s.subject.name
+        # Determine subject, semester, class, and department details
+        sub = None
+        if getattr(s, "subject_id", None) and s.subject_id in subjects:
+            sub = subjects[s.subject_id]
+        elif getattr(s, "subject", None):
+            sub = s.subject
+        elif s.profession_metadata and s.profession_metadata.get("subject_id") and s.profession_metadata.get("subject_id") in subjects:
+            sub = subjects[s.profession_metadata["subject_id"]]
         elif s.profession_metadata and s.profession_metadata.get("subject"):
-            subject_name = s.profession_metadata.get("subject")
-        elif s.title and (" Lecture" in s.title or " Lab" in s.title):
+            meta_name = str(s.profession_metadata.get("subject")).lower()
+            for cand in subjects.values():
+                if cand.name.lower() == meta_name or cand.code.lower() == meta_name:
+                    sub = cand
+                    break
+
+        subject_name = None
+        subject_code = None
+        semester_val = None
+        class_val = None
+
+        if sub:
+            subject_name = sub.name
+            subject_code = sub.code
+            semester_val = sub.semester
+            class_val = sub.class_name
+
+        # Fallbacks to profession_metadata
+        prof_meta = s.profession_metadata or {}
+        if not semester_val:
+            semester_val = prof_meta.get("semester")
+        if not class_val:
+            class_val = prof_meta.get("class") or prof_meta.get("class_name")
+        if not subject_name and prof_meta.get("subject"):
+            subject_name = prof_meta.get("subject")
+        elif not subject_name and s.title and (" Lecture" in s.title or " Lab" in s.title):
             subject_name = s.title.split("(")[0].replace(" Lecture", "").replace(" Lab", "").strip()
+
+        # Department name
+        dept = departments.get(s.department_id) if s.department_id else (departments.get(sub.department_id) if sub and sub.department_id else None)
+        dept_name = dept.name if dept else (sub.department.name if sub and sub.department else None)
 
         org_type = sched.organization.type if sched.organization else ""
         if not subject_name and p_type == "work" and org_type in ["college", "university"]:
@@ -111,14 +146,18 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
             "title": s.title,
             "subject": subject_name,
             "subject_name": subject_name,
-            "subject_id": getattr(s, "subject_id", None),
+            "subject_code": subject_code,
+            "subject_id": sub.id if sub else getattr(s, "subject_id", None),
+            "semester": semester_val,
+            "class_name": class_val,
             "date_str": s.date_str,
             "day_of_week": s.day_of_week,
             "start_time": s.start_time,
             "end_time": s.end_time,
             "resource_id": s.resource_id,
             "resource_name": res.name if res else "Not Assigned",
-            "department_id": s.department_id,
+            "department_id": s.department_id or (sub.department_id if sub else None),
+            "department_name": dept_name,
             "required_skills": s.required_skills or [],
             "required_qualifications": s.required_qualifications or [],
             "profession_metadata": s.profession_metadata or {},
@@ -685,6 +724,9 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
         curr = datetime.datetime.strptime(req.period_start, "%Y-%m-%d").date()
         end_d = datetime.datetime.strptime(req.period_end, "%Y-%m-%d").date()
         
+        # Check if subjects exist to provision academic timetable slots
+        subjects = db.query(Subject).filter(Subject.org_id == req.org_id).order_by(Subject.semester.asc(), Subject.name.asc()).all()
+        sub_idx = 0
         slot_objects = []
         slot_order_idx = 0
         while curr <= end_d:
@@ -693,23 +735,43 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
             if day_cfg and day_cfg.get("is_working_day"):
                 for p in day_cfg.get("periods", []):
                     p_type = p.get("type", "work")
+                    slot_sub_id = None
+                    slot_title = f"{p.get('name', 'Duty Block')}"
+                    slot_meta = {}
+                    slot_dept_id = dept_id
+                    if p_type == "work" and subjects:
+                        chosen_sub = subjects[sub_idx % len(subjects)]
+                        slot_sub_id = chosen_sub.id
+                        slot_title = f"{chosen_sub.name} ({chosen_sub.code})"
+                        slot_dept_id = chosen_sub.department_id or dept_id
+                        slot_meta = {
+                            "subject": chosen_sub.name,
+                            "semester": chosen_sub.semester,
+                            "class": chosen_sub.class_name,
+                            "subject_id": chosen_sub.id,
+                            "lab": chosen_sub.is_lab
+                        }
+                        sub_idx += 1
+
                     s_obj = RequirementSlot(
                         org_id=req.org_id,
                         schedule_id=sched.id,
-                        title=f"{p.get('name', 'Duty Block')}",
+                        subject_id=slot_sub_id,
+                        title=slot_title,
                         date_str=curr.strftime("%Y-%m-%d"),
                         day_of_week=day_idx,
                         start_time=p.get("start_time", "09:00"),
                         end_time=p.get("end_time", "11:00"),
                         resource_id=res_id,
-                        department_id=dept_id,
+                        department_id=slot_dept_id,
                         min_staff=p.get("min_staff", 1) if p_type == "work" else 0,
                         target_staff=p.get("target_staff", 1) if p_type == "work" else 0,
                         max_staff=p.get("max_staff", 1) if p_type == "work" else 0,
                         slot_order=slot_order_idx,
                         period_type=p_type,
                         is_locked=False,
-                        required_skills=[]
+                        profession_metadata=slot_meta,
+                        required_skills=[chosen_sub.name] if (p_type == "work" and subjects) else []
                     )
                     db.add(s_obj)
                     slot_objects.append(s_obj)
@@ -717,6 +779,24 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
             curr += datetime.timedelta(days=1)
         db.commit()
         all_slots = slot_objects
+
+    # Link existing slots to subjects if matched
+    org_subs = db.query(Subject).filter(Subject.org_id == req.org_id).all()
+    if org_subs:
+        for sl in all_slots:
+            if getattr(sl, "period_type", "work") == "work" and not sl.subject_id:
+                for s in org_subs:
+                    if (s.name.lower() in sl.title.lower()) or (sl.profession_metadata and sl.profession_metadata.get("subject", "").lower() in s.name.lower()):
+                        sl.subject_id = s.id
+                        sl.department_id = s.department_id or sl.department_id
+                        meta = dict(sl.profession_metadata or {})
+                        meta["subject"] = s.name
+                        meta["semester"] = s.semester
+                        meta["class"] = s.class_name
+                        meta["subject_id"] = s.id
+                        sl.profession_metadata = meta
+                        break
+        db.commit()
 
     # Filter slots based on selective regeneration parameters
     slots_to_solve = []
@@ -746,6 +826,9 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
         {
             "id": s.id,
             "title": s.title,
+            "subject_id": s.subject_id,
+            "class_name": s.subject.class_name if s.subject else (s.profession_metadata or {}).get("class"),
+            "semester": s.subject.semester if s.subject else (s.profession_metadata or {}).get("semester"),
             "date_str": s.date_str,
             "day_of_week": s.day_of_week,
             "start_time": s.start_time,
@@ -812,6 +895,18 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
         for e in holiday_exceptions
     ]
 
+    # Fetch teacher-subject assignments
+    teacher_assignments = db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == req.org_id).all()
+    teacher_assign_dicts = [
+        {
+            "person_id": ta.person_id,
+            "subject_id": ta.subject_id,
+            "semester": ta.semester,
+            "class_name": ta.class_name
+        }
+        for ta in teacher_assignments
+    ]
+
     # Run OR-Tools solver
     engine = SchedulingEngine()
     solution = engine.solve(
@@ -822,7 +917,8 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
         preference_weight=req.preference_weight,
         overtime_penalty_weight=req.overtime_penalty_weight,
         holidays=holiday_dicts,
-        holiday_exceptions=exception_dicts
+        holiday_exceptions=exception_dicts,
+        teacher_assignments=teacher_assign_dicts
     )
 
     # Delete only non-locked assignments belonging to solved slots

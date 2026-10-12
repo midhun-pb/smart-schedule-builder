@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../api/client';
-import { TimetableSlot, Person, Schedule, ActiveReplacement, Holiday, Department, Subject } from '../../types';
+import { TimetableSlot, Person, Schedule, ActiveReplacement, Holiday, Department, Subject, Semester, TeacherSubjectAssignment } from '../../types';
 import { triggerHaptic } from '../../utils/haptics';
 import {
   CalendarDays,
@@ -34,6 +34,8 @@ import {
   MapPin,
   Calendar,
   Search,
+  BookOpen,
+  GraduationCap,
 } from 'lucide-react';
 
 const ALL_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -92,9 +94,13 @@ export const ScheduleModule: React.FC = () => {
   const [people, setPeople] = useState<Person[]>([]);
   const [resources, setResources] = useState<any[]>([]);
   const [viewMode, setViewMode] = useState<'week' | 'day' | 'month'>('week');
-  const [perspective, setPerspective] = useState<'matrix' | 'employee' | 'department' | 'resource' | 'holiday'>('matrix');
+  const [perspective, setPerspective] = useState<'matrix' | 'employee' | 'department' | 'resource' | 'holiday' | 'academic'>('matrix');
   const [selectedDayView, setSelectedDayView] = useState<number>(0);
   const [filterDept, setFilterDept] = useState<string>('all');
+  const [filterSemester, setFilterSemester] = useState<string>('all');
+  const [filterClass, setFilterClass] = useState<string>('all');
+  const [semestersList, setSemestersList] = useState<Semester[]>([]);
+  const [teacherAssignmentsList, setTeacherAssignmentsList] = useState<TeacherSubjectAssignment[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   // Calendar Date Navigation (Dynamic Week, Day, and Month Handling)
@@ -200,9 +206,39 @@ export const ScheduleModule: React.FC = () => {
   const [solverSummary, setSolverSummary] = useState<any | null>(null);
   const [isSolverSummaryOpen, setIsSolverSummaryOpen] = useState(false);
 
-  // Manual Edit Slot Subject
+  // Manual Edit Slot Subject & Academic Fields
   const [editSlotSubjectId, setEditSlotSubjectId] = useState<number | undefined>(undefined);
   const [editSlotSubjectName, setEditSlotSubjectName] = useState<string>('');
+  const [editSlotSemester, setEditSlotSemester] = useState<string>('');
+  const [editSlotClass, setEditSlotClass] = useState<string>('');
+  const [editSlotResourceId, setEditSlotResourceId] = useState<number | undefined>(undefined);
+
+  // Academic Management State (University / College Semester & Faculty Assignments)
+  const [academicSemFilter, setAcademicSemFilter] = useState<string>('all');
+  const [academicDeptFilter, setAcademicDeptFilter] = useState<string>('all');
+  const [isAddSemModalOpen, setIsAddSemModalOpen] = useState<boolean>(false);
+  const [newSemName, setNewSemName] = useState<string>('');
+  const [newSemCode, setNewSemCode] = useState<string>('');
+  const [newSemYear, setNewSemYear] = useState<string>('2026-2027');
+
+  const [isAddSubModalOpen, setIsAddSubModalOpen] = useState<boolean>(false);
+  const [newSubName, setNewSubName] = useState<string>('');
+  const [newSubCode, setNewSubCode] = useState<string>('');
+  const [newSubDeptId, setNewSubDeptId] = useState<number | undefined>(undefined);
+  const [newSubSemId, setNewSubSemId] = useState<number | undefined>(undefined);
+  const [newSubSemStr, setNewSubSemStr] = useState<string>('S1');
+  const [newSubClass, setNewSubClass] = useState<string>('S1 A');
+  const [newSubHours, setNewSubHours] = useState<number>(4);
+  const [newSubIsLab, setNewSubIsLab] = useState<boolean>(false);
+
+  const [isAddAssignModalOpen, setIsAddAssignModalOpen] = useState<boolean>(false);
+  const [assignTeacherId, setAssignTeacherId] = useState<number | undefined>(undefined);
+  const [assignSubId, setAssignSubId] = useState<number | undefined>(undefined);
+  const [assignDeptId, setAssignDeptId] = useState<number | undefined>(undefined);
+  const [assignSemStr, setAssignSemStr] = useState<string>('S3');
+  const [assignClass, setAssignClass] = useState<string>('S3 A');
+  const [assignHours, setAssignHours] = useState<number>(4);
+  const [assignRoomId, setAssignRoomId] = useState<number | undefined>(undefined);
 
   const fetchScheduleData = async () => {
     if (!activeOrg) return;
@@ -239,14 +275,18 @@ export const ScheduleModule: React.FC = () => {
       const staff = await api.getPeople({ org_id: activeOrg.id });
       setPeople(staff);
 
-      const [hList, dList, sList] = await Promise.all([
+      const [hList, dList, sList, semList, taList] = await Promise.all([
         api.getHolidays(activeOrg.id).catch(() => []),
         api.getDepartments(activeOrg.id).catch(() => []),
         api.getSubjects(activeOrg.id).catch(() => []),
+        api.getSemesters(activeOrg.id).catch(() => []),
+        api.getTeacherAssignments(activeOrg.id).catch(() => []),
       ]);
       setHolidaysList(hList || []);
       setDepartmentsList(dList || []);
       setSubjectsList(sList || []);
+      setSemestersList(semList || []);
+      setTeacherAssignmentsList(taList || []);
     } catch (err) {
       console.error(err);
     } finally {
@@ -434,6 +474,49 @@ export const ScheduleModule: React.FC = () => {
     return sortedBands;
   }, [slots]);
 
+  // Distinct available classes / batches for timetable filtering
+  const availableClasses = React.useMemo(() => {
+    const classSet = new Set<string>();
+    slots.forEach((s) => {
+      const cls = (s.class_name || (s as any).profession_metadata?.class_name)?.trim();
+      if (cls) classSet.add(cls);
+    });
+    teacherAssignmentsList.forEach((ta) => {
+      if (ta.class_name?.trim()) classSet.add(ta.class_name.trim());
+    });
+    subjectsList.forEach((sub) => {
+      if (sub.class_name?.trim()) classSet.add(sub.class_name.trim());
+    });
+    if (classSet.size === 0 && activeOrg?.type === 'college') {
+      ['S1 A', 'S1 B', 'S3 A', 'S3 B', 'S5 A', 'S5 B', 'S7 A'].forEach((c) => classSet.add(c));
+    }
+    return Array.from(classSet).sort();
+  }, [slots, teacherAssignmentsList, subjectsList, activeOrg]);
+
+  // Semester, Department, and Class Filtered Slots for Timetable Matrix
+  const matrixFilteredSlots = React.useMemo(() => {
+    return slots.filter((slot) => {
+      // 1. Department Filter
+      if (filterDept !== 'all') {
+        const dId = Number(filterDept);
+        if (slot.department_id && slot.department_id !== dId) return false;
+      }
+      // 2. Semester Filter
+      if (filterSemester !== 'all') {
+        const targetSem = filterSemester.trim().toLowerCase();
+        const slotSem = ((slot as any).semester || (slot as any).profession_metadata?.semester || '').trim().toLowerCase();
+        if (slotSem && !slotSem.includes(targetSem) && !targetSem.includes(slotSem)) return false;
+      }
+      // 3. Class Filter
+      if (filterClass !== 'all') {
+        const targetCls = filterClass.trim().toLowerCase();
+        const slotCls = ((slot as any).class_name || (slot as any).profession_metadata?.class_name || slot.title || '').trim().toLowerCase();
+        if (!slotCls.includes(targetCls)) return false;
+      }
+      return true;
+    });
+  }, [slots, filterDept, filterSemester, filterClass]);
+
   // Add new Slot
   const handleCreateNewSlot = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -512,12 +595,20 @@ export const ScheduleModule: React.FC = () => {
           replacement_reason: 'Manager manual timetable override',
         });
       }
+      const profMeta = {
+        ...(editSlot.profession_metadata || {}),
+        semester: editSlotSemester || (editSlot as any).semester,
+        class_name: editSlotClass || (editSlot as any).class_name,
+        subject: editSlotSubjectName,
+      };
       await api.updateSlot(editSlot.slot_id, {
         subject_id: editSlotSubjectId || undefined,
         subject_name: editSlotSubjectName || undefined,
         title: editSlotSubjectName ? editSlotSubjectName : editSlot.title,
+        resource_id: editSlotResourceId,
+        profession_metadata: profMeta,
       });
-      addToast('Assignment Updated', 'Timetable slot assignment and subject saved', 'success');
+      addToast('Assignment Updated', 'Timetable slot assignment and academic details saved', 'success');
       setEditSlot(null);
       fetchScheduleData();
     } catch (err: any) {
@@ -740,6 +831,117 @@ export const ScheduleModule: React.FC = () => {
     }
   };
 
+  // Academic Management Handlers (Semesters, Subjects, Faculty Assignments)
+  const handleCreateSemester = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrg || !newSemCode.trim()) return;
+    triggerHaptic(15);
+    try {
+      await api.createSemester(activeOrg.id, {
+        name: newSemName.trim() || `Semester ${newSemCode.trim()}`,
+        code: newSemCode.trim().toUpperCase(),
+        academic_year: newSemYear.trim() || '2026-2027',
+      });
+      addToast('Semester Added', `Semester ${newSemCode.trim().toUpperCase()} configured`, 'success');
+      setIsAddSemModalOpen(false);
+      setNewSemName('');
+      setNewSemCode('');
+      fetchScheduleData();
+    } catch (err: any) {
+      addToast('Error', err.message || 'Failed to add semester', 'error');
+    }
+  };
+
+  const handleDeleteSemester = async (id: number, code: string) => {
+    if (!activeOrg) return;
+    if (!window.confirm(`Delete semester ${code}? Associated subjects will need semester reassignment.`)) return;
+    triggerHaptic(15);
+    try {
+      await api.deleteSemester(activeOrg.id, id);
+      addToast('Semester Deleted', `Semester ${code} removed`, 'info');
+      fetchScheduleData();
+    } catch (err: any) {
+      addToast('Error', err.message || 'Failed to delete semester', 'error');
+    }
+  };
+
+  const handleCreateSubject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrg || !newSubName.trim()) return;
+    triggerHaptic(15);
+    try {
+      await api.createSubject(activeOrg.id, {
+        name: newSubName.trim(),
+        code: newSubCode.trim().toUpperCase() || newSubName.slice(0, 5).toUpperCase(),
+        department_id: newSubDeptId || (departmentsList[0]?.id ?? undefined),
+        semester: newSubSemStr,
+        semester_id: newSubSemId || undefined,
+        class_name: newSubClass.trim() || 'S1 A',
+        required_hours_per_week: newSubHours,
+        is_lab: newSubIsLab,
+      });
+      addToast('Subject Created', `${newSubName.trim()} added to ${newSubSemStr}`, 'success');
+      setIsAddSubModalOpen(false);
+      setNewSubName('');
+      setNewSubCode('');
+      fetchScheduleData();
+    } catch (err: any) {
+      addToast('Error', err.message || 'Failed to create subject', 'error');
+    }
+  };
+
+  const handleDeleteSubject = async (id: number, name: string) => {
+    if (!activeOrg) return;
+    if (!window.confirm(`Delete subject ${name} from curriculum?`)) return;
+    triggerHaptic(15);
+    try {
+      await api.deleteSubject(activeOrg.id, id);
+      addToast('Subject Deleted', `${name} removed from curriculum`, 'info');
+      fetchScheduleData();
+    } catch (err: any) {
+      addToast('Error', err.message || 'Failed to delete subject', 'error');
+    }
+  };
+
+  const handleCreateTeacherAssignment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrg || !assignTeacherId || !assignSubId) {
+      addToast('Validation', 'Please select both a faculty member and a subject', 'error');
+      return;
+    }
+    triggerHaptic(15);
+    try {
+      await api.createTeacherAssignment(activeOrg.id, {
+        person_id: assignTeacherId,
+        subject_id: assignSubId,
+        department_id: assignDeptId || (departmentsList[0]?.id ?? undefined),
+        semester: assignSemStr,
+        class_name: assignClass.trim() || 'S3 A',
+        required_hours: assignHours,
+        eligible_rooms: assignRoomId ? [assignRoomId] : [],
+        is_primary: true,
+      });
+      addToast('Teacher Assigned', 'Faculty member successfully assigned to subject', 'success');
+      setIsAddAssignModalOpen(false);
+      fetchScheduleData();
+    } catch (err: any) {
+      addToast('Assignment Conflict', err.message || 'Failed to assign teacher', 'error');
+    }
+  };
+
+  const handleDeleteTeacherAssignment = async (id: number) => {
+    if (!activeOrg) return;
+    if (!window.confirm('Remove this teacher-subject assignment?')) return;
+    triggerHaptic(15);
+    try {
+      await api.deleteTeacherAssignment(activeOrg.id, id);
+      addToast('Assignment Removed', 'Teacher assignment removed', 'info');
+      fetchScheduleData();
+    } catch (err: any) {
+      addToast('Error', err.message || 'Failed to remove assignment', 'error');
+    }
+  };
+
   // Reusable slot card renderer with prominent subject display & drag-and-drop
   const renderSlotCard = (slot: TimetableSlot) => {
     const isReplacement = slot.is_replacement;
@@ -748,7 +950,13 @@ export const ScheduleModule: React.FC = () => {
     const isOverstaffed = slot.staffing_status === 'overstaffed';
     const isLocked = slot.is_locked;
     const isCollege = activeOrg?.type === 'college';
-    const subjectName = slot.subject || slot.subject_name || (slot as any).profession_metadata?.subject;
+    const subjectName = slot.subject_name || slot.subject || (slot as any).profession_metadata?.subject;
+    const semesterStr = slot.semester || (slot as any).profession_metadata?.semester || (isCollege ? 'S3' : '');
+    const deptName = slot.department_name || departmentsList.find((d) => d.id === slot.department_id)?.name || (isCollege ? 'Computer Science' : '');
+    const className = slot.class_name || (slot as any).profession_metadata?.class_name || (isCollege ? 'S3 A' : '');
+    const teacherName = slot.person_name;
+    const roomName = slot.resource_name || 'Room not assigned';
+    const periodTitle = slot.title;
 
     return (
       <div
@@ -770,6 +978,9 @@ export const ScheduleModule: React.FC = () => {
           setSelectedPersonId(slot.person_id);
           setEditSlotSubjectId(slot.subject_id || (slot as any).subject?.id);
           setEditSlotSubjectName(subjectName || slot.title || '');
+          setEditSlotSemester(semesterStr || 'S3');
+          setEditSlotClass(className || 'S3 A');
+          setEditSlotResourceId(slot.resource_id);
         }}
         className={`p-3 rounded-2xl glass-card border transition-all cursor-pointer relative group ${
           dragOverSlotId === slot.slot_id
@@ -789,9 +1000,9 @@ export const ScheduleModule: React.FC = () => {
       >
         {/* Card Top: Time Window & Quick Action Buttons */}
         <div className="flex items-center justify-between text-[10px] text-slate-500 dark:text-slate-400 font-semibold mb-1">
-          <span className="flex items-center gap-1">
-            <Clock className="w-3 h-3 text-blue-500" />
-            {formatOvernightRange(slot.date_str || '2026-10-12', slot.start_time, slot.end_time)}
+          <span className="flex items-center gap-1 font-mono font-bold text-slate-700 dark:text-slate-300">
+            <Clock className="w-3 h-3 text-blue-500 flex-shrink-0" />
+            <span>{slot.start_time}–{slot.end_time}</span>
           </span>
 
           <div className="flex items-center gap-1">
@@ -848,40 +1059,81 @@ export const ScheduleModule: React.FC = () => {
           </div>
         </div>
 
-        {/* PROMINENT SUBJECT DISPLAY IN BOLD */}
-        <div className="space-y-0.5">
+        {/* 1. SUBJECT NAME IN BOLD (Most Prominent Item) */}
+        <div className="space-y-1">
           {isBreak ? (
             <div className="text-xs font-black text-slate-500 italic">
-              {slot.period_type === 'lunch' ? 'Lunch Break' : slot.title || 'Recess Interval'}
+              {slot.period_type === 'lunch' ? 'Lunch Break' : periodTitle || 'Recess Interval'}
             </div>
           ) : subjectName ? (
-            <div>
-              <div className="text-xs font-black text-blue-600 dark:text-blue-400 leading-tight">
-                {subjectName}
-              </div>
-              {slot.title && slot.title !== subjectName && (
-                <div className="text-[10px] font-semibold text-slate-600 dark:text-slate-300 truncate">
-                  {slot.title}
-                </div>
-              )}
+            <div className="text-xs font-black text-blue-600 dark:text-blue-400 leading-tight tracking-tight">
+              {subjectName}
             </div>
           ) : isCollege ? (
-            <div>
-              <div className="text-xs font-black text-amber-500 dark:text-amber-400 leading-tight">
-                Subject not assigned
-              </div>
-              <div className="text-[10px] text-slate-500 truncate">{slot.title}</div>
+            <div className="text-xs font-black text-amber-500 dark:text-amber-400 leading-tight flex items-center gap-1">
+              <span>Subject not assigned</span>
+              <span className="text-[9px] font-normal underline opacity-80">(click to assign)</span>
             </div>
           ) : (
             <div className="text-xs font-black text-slate-900 dark:text-white leading-tight">
-              {slot.title}
+              {periodTitle}
             </div>
           )}
-        </div>
 
-        {/* Resource Location */}
-        <div className="text-[10px] text-slate-400 mt-1 truncate">
-          {slot.resource_name || 'No Room Assigned'}
+          {/* 2. SEMESTER & DEPARTMENT LINE (Semester: S3 | Department: Computer Science) */}
+          {!isBreak && isCollege && (
+            <div className="text-[10px] font-bold text-slate-600 dark:text-slate-300 flex items-center gap-1 flex-wrap">
+              <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 font-extrabold border border-blue-500/20">
+                Semester: {semesterStr || 'S3'}
+              </span>
+              <span className="text-slate-300 dark:text-slate-600">|</span>
+              <span className="truncate text-slate-600 dark:text-slate-400">
+                Dept: {deptName || 'Computer Science'}
+              </span>
+            </div>
+          )}
+
+          {/* 3. CLASS (Class: S3 A) */}
+          {!isBreak && className && (
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Class:</span>
+              <span className="font-bold text-slate-800 dark:text-slate-200">{className}</span>
+            </div>
+          )}
+
+          {/* 4. TEACHER (Teacher: Dr. Alan Turing) */}
+          {!isBreak && (
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 flex items-center gap-1">
+              <span className="text-slate-400">Teacher:</span>
+              {teacherName ? (
+                <span className="font-bold text-slate-800 dark:text-slate-100 truncate">
+                  {teacherName}
+                </span>
+              ) : (
+                <span className="text-amber-600 dark:text-amber-400 font-semibold italic">
+                  Not assigned
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* 5. ROOM (Room: Lecture Hall 101) & TIME */}
+          <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between gap-1 pt-1 border-t border-slate-200/40 dark:border-slate-800/40">
+            <span className="truncate flex items-center gap-1">
+              <MapPin className="w-2.5 h-2.5 text-slate-400 flex-shrink-0" />
+              <span>Room: {roomName}</span>
+            </span>
+            <span className="font-mono text-[9px] text-blue-600 dark:text-blue-400 font-bold whitespace-nowrap">
+              {slot.start_time}–{slot.end_time}
+            </span>
+          </div>
+
+          {/* 7. SECONDARY INFO: Period Name (e.g. "Morning Period 1") */}
+          {!isBreak && periodTitle && periodTitle !== subjectName && (
+            <div className="text-[9px] italic text-slate-400 truncate">
+              Period: {periodTitle}
+            </div>
+          )}
         </div>
 
         {/* Staff Assignment & Badges */}
@@ -1126,6 +1378,20 @@ export const ScheduleModule: React.FC = () => {
             <Calendar className="w-3.5 h-3.5" />
             <span>Holiday & Closure View</span>
           </button>
+          {activeOrg?.type === 'college' && (
+            <button
+              onClick={() => {
+                triggerHaptic(10);
+                setPerspective('academic');
+              }}
+              className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                perspective === 'academic' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
+              }`}
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>Semesters & Subjects</span>
+            </button>
+          )}
         </div>
 
         {/* Dynamic Detailed Date Banner with Navigation */}
@@ -1275,7 +1541,7 @@ export const ScheduleModule: React.FC = () => {
                       );
 
                       // Match slots
-                      const daySlots = slots.filter(
+                      const daySlots = matrixFilteredSlots.filter(
                         (s) =>
                           (s.date_str && s.date_str === isoDate) ||
                           (!s.date_str && s.day_of_week === cellWeekday)
@@ -1410,6 +1676,107 @@ export const ScheduleModule: React.FC = () => {
           ) : (
             /* WEEK AND DAY VIEW MATRIX */
             <div className="space-y-4">
+              {/* Semester & Timetable Filter Bar (Requirement 4) */}
+              <div className="p-4 rounded-3xl glass-panel border border-white/40 dark:border-white/10 space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2 font-bold text-slate-800 dark:text-slate-200">
+                    <Filter className="w-4 h-4 text-blue-500" />
+                    <span>Timetable Filters:</span>
+                    <span className="text-[11px] text-slate-400 font-normal">
+                      Filter periods by department, academic semester, and class section
+                    </span>
+                  </div>
+
+                  {/* Active filters status / Clear button */}
+                  {(filterDept !== 'all' || filterSemester !== 'all' || filterClass !== 'all') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic(8);
+                        setFilterDept('all');
+                        setFilterSemester('all');
+                        setFilterClass('all');
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400 font-semibold text-[11px] flex items-center gap-1 w-fit"
+                    >
+                      <X className="w-3 h-3" />
+                      <span>Reset Filters</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {/* Department Filter */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Department:
+                    </label>
+                    <select
+                      value={filterDept}
+                      onChange={(e) => {
+                        triggerHaptic(5);
+                        setFilterDept(e.target.value);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    >
+                      <option value="all">All Departments</option>
+                      {departmentsList.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name} ({d.code})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Semester Filter */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Semester:
+                    </label>
+                    <select
+                      value={filterSemester}
+                      onChange={(e) => {
+                        triggerHaptic(5);
+                        setFilterSemester(e.target.value);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    >
+                      <option value="all">All Semesters</option>
+                      {(semestersList.length > 0
+                        ? semestersList.map((s) => s.code || s.name)
+                        : ['S1', 'S3', 'S5', 'S7']
+                      ).map((sem) => (
+                        <option key={sem} value={sem}>
+                          Semester {sem}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Class / Section Filter */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Class / Section:
+                    </label>
+                    <select
+                      value={filterClass}
+                      onChange={(e) => {
+                        triggerHaptic(5);
+                        setFilterClass(e.target.value);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    >
+                      <option value="all">All Classes</option>
+                      {availableClasses.map((cls) => (
+                        <option key={cls} value={cls}>
+                          Class {cls}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
               {/* Timetable Layout Toolbar */}
               <div className="p-3.5 rounded-2xl glass-panel border border-white/40 dark:border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                 <div className="flex items-center gap-2 text-slate-800 dark:text-slate-200 font-bold">
@@ -1517,7 +1884,7 @@ export const ScheduleModule: React.FC = () => {
 
                               {/* Time Columns across top */}
                               {distinctTimeBands.map((band) => {
-                                const cellSlots = slots.filter(
+                                const cellSlots = matrixFilteredSlots.filter(
                                   (s) =>
                                     s.day_of_week === actualDayIdx &&
                                     s.start_time === band.start &&
@@ -1619,7 +1986,7 @@ export const ScheduleModule: React.FC = () => {
                         } divide-x divide-slate-200/40 dark:divide-slate-800/40 min-h-[500px] p-3 gap-3 bg-white/20 dark:bg-black/10`}
                       >
                         {(viewMode === 'day' ? [selectedDayView] : displayedDays.map((_, i) => i)).map((dayIdx) => {
-                          const daySlots = slots.filter((s) => s.day_of_week === dayIdx);
+                          const daySlots = matrixFilteredSlots.filter((s) => s.day_of_week === dayIdx);
 
                           return (
                             <div key={dayIdx} className="space-y-3">
@@ -2170,6 +2537,395 @@ export const ScheduleModule: React.FC = () => {
         </div>
       )}
 
+      {/* ACADEMIC CURRICULUM & FACULTY ASSIGNMENTS PERSPECTIVE (Requirements 1 & 2) */}
+      {perspective === 'academic' && (
+        <div className="space-y-6 animate-in fade-in duration-300">
+          {/* Top Banner */}
+          <div className="p-6 rounded-3xl glass-panel border border-white/40 dark:border-white/10 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <BookOpen className="w-5 h-5 text-blue-500" />
+                <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                  Semester-Wise Subject & Teacher Assignment System
+                </h3>
+              </div>
+              <p className="text-xs text-slate-500 mt-1 max-w-2xl">
+                Configure college academic semesters, define subjects per semester with classes/sections, and assign qualified teachers to courses and batches.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(10);
+                  setIsAddSemModalOpen(true);
+                }}
+                className="px-3.5 py-2 rounded-xl glass-pill hover:bg-blue-500/10 text-xs font-semibold text-blue-600 dark:text-blue-400 border border-blue-500/25 flex items-center gap-1.5 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Semester</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(10);
+                  setIsAddSubModalOpen(true);
+                }}
+                className="px-3.5 py-2 rounded-xl glass-pill hover:bg-emerald-500/10 text-xs font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-500/25 flex items-center gap-1.5 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Subject</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(10);
+                  setIsAddAssignModalOpen(true);
+                }}
+                className="px-4 py-2 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-1.5 shadow-sm"
+              >
+                <GraduationCap className="w-3.5 h-3.5" />
+                <span>Assign Faculty</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Section 1: Academic Semesters Directory */}
+          <div className="p-6 rounded-3xl glass-panel border border-white/40 dark:border-white/10 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-blue-500" />
+                  <span>College Academic Semesters</span>
+                </h4>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Semesters currently configured for {activeOrg?.name}
+                </p>
+              </div>
+              <span className="text-xs font-bold px-2.5 py-1 rounded-full glass-pill text-blue-600">
+                {semestersList.length || 4} Active Semesters
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {(semestersList.length > 0 ? semestersList : [
+                { id: 1, name: 'Semester S1', code: 'S1', academic_year: '2026-2027', is_active: true },
+                { id: 2, name: 'Semester S3', code: 'S3', academic_year: '2026-2027', is_active: true },
+                { id: 3, name: 'Semester S5', code: 'S5', academic_year: '2026-2027', is_active: true },
+                { id: 4, name: 'Semester S7', code: 'S7', academic_year: '2026-2027', is_active: true },
+              ]).map((sem: any) => {
+                const subCount = subjectsList.filter((s) => (s.semester === sem.code || s.semester_id === sem.id)).length;
+                const assignCount = teacherAssignmentsList.filter((ta) => ta.semester === sem.code || ta.semester_id === sem.id).length;
+
+                return (
+                  <div
+                    key={sem.id || sem.code}
+                    className="p-4 rounded-2xl glass-card border border-white/40 dark:border-white/10 space-y-3 relative group hover:border-blue-400 transition-all"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="w-10 h-10 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 font-black text-sm flex items-center justify-center border border-blue-500/20">
+                        {sem.code}
+                      </div>
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase bg-emerald-500/10 text-emerald-600 border border-emerald-500/20">
+                        Active
+                      </span>
+                    </div>
+
+                    <div>
+                      <div className="font-extrabold text-sm text-slate-900 dark:text-white">
+                        {sem.name}
+                      </div>
+                      <div className="text-[11px] text-slate-500 font-medium">
+                        Year: {sem.academic_year || '2026-2027'}
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-200/40 dark:border-slate-800/40 text-[10px] text-slate-500 flex justify-between">
+                      <span><strong>{subCount}</strong> Subjects</span>
+                      <span><strong>{assignCount}</strong> Faculty</span>
+                    </div>
+
+                    {sem.id && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSemester(sem.id, sem.code)}
+                        className="absolute top-3 right-3 p-1 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
+                        title="Delete semester"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Section 2: Semester-Wise Subjects Curriculum */}
+          <div className="p-6 rounded-3xl glass-panel border border-white/40 dark:border-white/10 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-emerald-500" />
+                  <span>Semester-Wise Subjects Curriculum</span>
+                </h4>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Subjects categorized by semester with department, credits, and teaching hours
+                </p>
+              </div>
+
+              {/* Semester Filter Pills */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setAcademicSemFilter('all')}
+                  className={`px-3 py-1.5 rounded-xl font-bold transition-all ${
+                    academicSemFilter === 'all'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'glass-pill text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  All Semesters
+                </button>
+                {(semestersList.length > 0 ? semestersList.map((s) => s.code || s.name) : ['S1', 'S3', 'S5', 'S7']).map((sem) => (
+                  <button
+                    key={sem}
+                    type="button"
+                    onClick={() => setAcademicSemFilter(sem)}
+                    className={`px-3 py-1.5 rounded-xl font-bold transition-all ${
+                      academicSemFilter === sem
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : 'glass-pill text-slate-600 dark:text-slate-300'
+                    }`}
+                  >
+                    {sem}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Grouped Subjects by Semester */}
+            <div className="space-y-6">
+              {(academicSemFilter === 'all'
+                ? (semestersList.length > 0 ? semestersList.map((s) => s.code || s.name) : ['S1', 'S3', 'S5', 'S7'])
+                : [academicSemFilter]
+              ).map((semCode) => {
+                const semSubs = subjectsList.filter((s) => (s.semester === semCode || (!s.semester && semCode === 'S1')));
+
+                return (
+                  <div key={semCode} className="space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-200/50 dark:border-slate-800/80 pb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                        <h5 className="font-extrabold text-sm text-slate-900 dark:text-white">
+                          Semester {semCode}
+                        </h5>
+                        <span className="text-xs text-slate-400 font-semibold">
+                          ({semSubs.length} Subjects)
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewSubSemStr(semCode);
+                          setIsAddSubModalOpen(true);
+                        }}
+                        className="text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>Add Subject to {semCode}</span>
+                      </button>
+                    </div>
+
+                    {semSubs.length === 0 ? (
+                      <div className="p-4 rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 text-center text-xs text-slate-400 italic">
+                        No subjects registered for Semester {semCode} yet. Click "Add Subject" to populate.
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {semSubs.map((sub) => {
+                          const assignedTeachers = teacherAssignmentsList.filter((ta) => ta.subject_id === sub.id);
+                          const dept = departmentsList.find((d) => d.id === sub.department_id);
+
+                          return (
+                            <div
+                              key={sub.id}
+                              className="p-4 rounded-2xl glass-card border border-white/40 dark:border-white/10 space-y-2.5 hover:border-blue-400 transition-all relative group"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                                    {sub.code}
+                                  </span>
+                                  <h6 className="font-extrabold text-sm text-slate-900 dark:text-white mt-1 leading-snug">
+                                    {sub.name}
+                                  </h6>
+                                </div>
+
+                                <div className="flex items-center gap-1">
+                                  <span className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase ${
+                                    sub.is_lab
+                                      ? 'bg-purple-500/10 text-purple-600 border border-purple-500/20'
+                                      : 'bg-slate-200/50 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                                  }`}>
+                                    {sub.is_lab ? 'Lab' : 'Theory'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteSubject(sub.id, sub.name)}
+                                    className="p-1 rounded text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                    title="Delete subject"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="text-[11px] text-slate-500 space-y-0.5">
+                                <div>Dept: <strong className="text-slate-700 dark:text-slate-300">{dept?.name || 'Computer Science'}</strong></div>
+                                <div>Batch: <strong className="text-slate-700 dark:text-slate-300">{sub.class_name || 'S3 A'}</strong> • Required: <strong className="text-blue-600">{sub.required_hours_per_week || 4} hrs/wk</strong></div>
+                              </div>
+
+                              {/* Faculty Assigned */}
+                              <div className="pt-2 border-t border-slate-200/40 dark:border-slate-800/40 flex items-center justify-between">
+                                <div className="text-[10px] text-slate-500 truncate max-w-[170px]">
+                                  {assignedTeachers.length > 0 ? (
+                                    <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                                      👨‍🏫 {assignedTeachers.map((ta) => ta.teacher_name).join(', ')}
+                                    </span>
+                                  ) : (
+                                    <span className="text-amber-500 italic">No faculty assigned</span>
+                                  )}
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAssignSubId(sub.id);
+                                    setAssignSemStr(sub.semester || semCode);
+                                    setAssignDeptId(sub.department_id);
+                                    setAssignClass(sub.class_name || 'S3 A');
+                                    setAssignHours(sub.required_hours_per_week || 4);
+                                    setIsAddAssignModalOpen(true);
+                                  }}
+                                  className="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:underline"
+                                >
+                                  + Assign
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Section 3: Teacher-Subject Assignment Matrix */}
+          <div className="p-6 rounded-3xl glass-panel border border-white/40 dark:border-white/10 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <GraduationCap className="w-4 h-4 text-purple-500" />
+                  <span>Teacher-Subject Assignment Matrix</span>
+                </h4>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Explicit mapping of faculty members to subjects, semesters, and student batches with conflict validation.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsAddAssignModalOpen(true)}
+                className="px-3.5 py-1.5 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-1.5 w-fit shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>New Faculty Assignment</span>
+              </button>
+            </div>
+
+            {/* Assignments Table */}
+            <div className="rounded-2xl border border-white/40 dark:border-white/10 overflow-hidden shadow-xs">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-100/70 dark:bg-slate-900/70 border-b border-slate-200/60 dark:border-slate-800/80 font-bold text-slate-700 dark:text-slate-300">
+                  <tr>
+                    <th className="py-3 px-4">Faculty Member</th>
+                    <th className="py-3 px-4">Department</th>
+                    <th className="py-3 px-4">Semester</th>
+                    <th className="py-3 px-4">Subject</th>
+                    <th className="py-3 px-4">Class / Batch</th>
+                    <th className="py-3 px-4">Required Hours</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200/40 dark:divide-slate-800/40 font-medium">
+                  {teacherAssignmentsList.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-8 text-center text-xs text-slate-400 italic">
+                        No faculty assignments configured yet. Click "New Faculty Assignment" above to map teachers to curriculum subjects.
+                      </td>
+                    </tr>
+                  ) : (
+                    teacherAssignmentsList.map((ta) => {
+                      const teacher = people.find((p) => p.id === ta.person_id);
+                      const sub = subjectsList.find((s) => s.id === ta.subject_id);
+
+                      return (
+                        <tr key={ta.id} className="hover:bg-white/30 dark:hover:bg-slate-900/30 transition-colors">
+                          <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">
+                            <div className="flex items-center gap-2">
+                              <div className="w-6 h-6 rounded-full bg-blue-500/10 text-blue-600 font-extrabold flex items-center justify-center text-[10px]">
+                                {(ta.teacher_name || teacher?.name || 'T').slice(0, 2).toUpperCase()}
+                              </div>
+                              <span>{ta.teacher_name || teacher?.name || 'Faculty Member'}</span>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
+                            {ta.department_name || teacher?.department_name || 'Computer Science'}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="px-2 py-0.5 rounded font-bold text-[10px] bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                              {ta.semester || 'S3'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 font-bold text-slate-800 dark:text-slate-200">
+                            {ta.subject_name || sub?.name || 'Subject'}
+                            <span className="text-[10px] text-slate-400 ml-1 font-mono">({ta.subject_code || sub?.code})</span>
+                          </td>
+                          <td className="py-3 px-4 font-semibold text-slate-700 dark:text-slate-300">
+                            {ta.class_name || 'S3 A'}
+                          </td>
+                          <td className="py-3 px-4 font-mono font-bold text-blue-600 dark:text-blue-400">
+                            {ta.required_hours || 4} hrs/wk
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteTeacherAssignment(ta.id)}
+                              className="p-1 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                              title="Delete assignment"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Active Swaps Panel at Bottom-Left of Timetable (Prompt Requirement 13) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="p-5 rounded-3xl glass-panel border border-amber-500/30 dark:border-amber-500/20 shadow-lg shadow-amber-500/5 space-y-3">
@@ -2512,6 +3268,8 @@ export const ScheduleModule: React.FC = () => {
                       const sObj = subjectsList.find((s) => s.id === sId);
                       if (sObj) {
                         setEditSlotSubjectName(sObj.name);
+                        if (sObj.semester) setEditSlotSemester(sObj.semester);
+                        if (sObj.class_name) setEditSlotClass(sObj.class_name);
                       }
                     }}
                     className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-semibold"
@@ -2534,10 +3292,40 @@ export const ScheduleModule: React.FC = () => {
                 )}
               </div>
 
+              {/* College Academic Scope: Semester & Class */}
+              {activeOrg?.type === 'college' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      Semester:
+                    </label>
+                    <input
+                      type="text"
+                      value={editSlotSemester}
+                      onChange={(e) => setEditSlotSemester(e.target.value)}
+                      placeholder="e.g. S3"
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      Class / Batch:
+                    </label>
+                    <input
+                      type="text"
+                      value={editSlotClass}
+                      onChange={(e) => setEditSlotClass(e.target.value)}
+                      placeholder="e.g. S3 A"
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    />
+                  </div>
+                </div>
+              )}
+
               {/* Staff Member Selection */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Assigned Staff Member:
+                  Assigned Staff / Faculty:
                 </label>
                 <select
                   value={selectedPersonId || ''}
@@ -2553,9 +3341,27 @@ export const ScheduleModule: React.FC = () => {
                 </select>
               </div>
 
+              {/* Physical Room Selection */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Classroom / Laboratory:
+                </label>
+                <select
+                  value={editSlotResourceId || ''}
+                  onChange={(e) => setEditSlotResourceId(e.target.value ? Number(e.target.value) : undefined)}
+                  className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs"
+                >
+                  <option value="">-- No Room Assigned --</option>
+                  {resources.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name} ({r.type}, Cap: {r.capacity})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="p-3 rounded-2xl glass-pill text-xs space-y-1 text-slate-500">
                 <div>Min Staff: <strong className="text-slate-700 dark:text-slate-200">{editSlot.min_staff}</strong> | Target: <strong className="text-slate-700 dark:text-slate-200">{editSlot.target_staff}</strong> | Max: <strong className="text-slate-700 dark:text-slate-200">{editSlot.max_staff}</strong></div>
-                <div>Required Skills: <strong className="text-slate-700 dark:text-slate-200">{editSlot.required_skills.join(', ') || 'Any Subject'}</strong></div>
               </div>
             </div>
 
@@ -3113,6 +3919,403 @@ export const ScheduleModule: React.FC = () => {
               >
                 <Plus className="w-4 h-4" />
                 <span>{labModal.isSubmitting ? 'Validating Conflicts...' : 'Schedule Lab Session'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* 1. Add Semester Modal */}
+      {isAddSemModalOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleCreateSemester}
+            className="max-w-md w-full rounded-3xl glass-panel border border-white/40 dark:border-white/10 p-6 space-y-4 animate-in fade-in zoom-in-95 duration-200"
+          >
+            <div className="flex items-center justify-between border-b border-slate-200/40 pb-3">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-5 h-5 text-blue-500" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Add Academic Semester
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddSemModalOpen(false)}
+                className="p-1 rounded-lg glass-pill"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                  Semester Code * (e.g. S1, S3, S5, S7)
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. S5"
+                  value={newSemCode}
+                  onChange={(e) => setNewSemCode(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl glass-input font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                  Semester Display Name
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Fifth Semester (B.Tech CSE)"
+                  value={newSemName}
+                  onChange={(e) => setNewSemName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl glass-input"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                  Academic Year
+                </label>
+                <input
+                  type="text"
+                  placeholder="2026-2027"
+                  value={newSemYear}
+                  onChange={(e) => setNewSemYear(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl glass-input"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-200/40 dark:border-slate-800/40">
+              <button
+                type="button"
+                onClick={() => setIsAddSemModalOpen(false)}
+                className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-semibold shadow-md"
+              >
+                Save Semester
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* 2. Add Subject Modal */}
+      {isAddSubModalOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleCreateSubject}
+            className="max-w-md w-full rounded-3xl glass-panel border border-white/40 dark:border-white/10 p-6 space-y-4 animate-in fade-in zoom-in-95 duration-200"
+          >
+            <div className="flex items-center justify-between border-b border-slate-200/40 pb-3">
+              <div className="flex items-center gap-2">
+                <BookOpen className="w-5 h-5 text-emerald-500" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Add Subject to Curriculum
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddSubModalOpen(false)}
+                className="p-1 rounded-lg glass-pill"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                  Subject / Course Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Distributed Database Systems"
+                  value={newSubName}
+                  onChange={(e) => setNewSubName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl glass-input font-bold"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Subject Code
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. CS302"
+                    value={newSubCode}
+                    onChange={(e) => setNewSubCode(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl glass-input uppercase font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Academic Semester *
+                  </label>
+                  <select
+                    value={newSubSemStr}
+                    onChange={(e) => setNewSubSemStr(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl glass-input font-bold"
+                  >
+                    {(semestersList.length > 0
+                      ? semestersList.map((s) => s.code || s.name)
+                      : ['S1', 'S3', 'S5', 'S7']
+                    ).map((sem) => (
+                      <option key={sem} value={sem}>
+                        Semester {sem}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Department
+                  </label>
+                  <select
+                    value={newSubDeptId || ''}
+                    onChange={(e) => setNewSubDeptId(e.target.value ? Number(e.target.value) : undefined)}
+                    className="w-full px-3 py-2 rounded-xl glass-input"
+                  >
+                    {departmentsList.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Target Class / Section
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. S3 A"
+                    value={newSubClass}
+                    onChange={(e) => setNewSubClass(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl glass-input font-semibold"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 items-center pt-1">
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Required Hours / Wk
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={newSubHours}
+                    onChange={(e) => setNewSubHours(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl glass-input text-center font-bold text-blue-600"
+                  />
+                </div>
+
+                <label className="flex items-center gap-2 pt-4 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={newSubIsLab}
+                    onChange={(e) => setNewSubIsLab(e.target.checked)}
+                    className="w-4 h-4 rounded text-purple-600 accent-purple-600"
+                  />
+                  <span className="font-semibold text-slate-700 dark:text-slate-300">Is Practical / Lab Course</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-200/40 dark:border-slate-800/40">
+              <button
+                type="button"
+                onClick={() => setIsAddSubModalOpen(false)}
+                className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-semibold shadow-md"
+              >
+                Add Subject
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* 3. Assign Faculty Member to Subject Modal */}
+      {isAddAssignModalOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleCreateTeacherAssignment}
+            className="max-w-md w-full rounded-3xl glass-panel border border-white/40 dark:border-white/10 p-6 space-y-4 animate-in fade-in zoom-in-95 duration-200"
+          >
+            <div className="flex items-center justify-between border-b border-slate-200/40 pb-3">
+              <div className="flex items-center gap-2">
+                <GraduationCap className="w-5 h-5 text-purple-500" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Assign Faculty to Subject
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddAssignModalOpen(false)}
+                className="p-1 rounded-lg glass-pill"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                  Select Faculty Member *
+                </label>
+                <select
+                  required
+                  value={assignTeacherId || ''}
+                  onChange={(e) => setAssignTeacherId(e.target.value ? Number(e.target.value) : undefined)}
+                  className="w-full px-3 py-2 rounded-xl glass-input font-bold"
+                >
+                  <option value="">-- Choose Teacher --</option>
+                  {people.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({p.role_title} • {p.department_name || 'Dept'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                  Select Subject / Course *
+                </label>
+                <select
+                  required
+                  value={assignSubId || ''}
+                  onChange={(e) => {
+                    const sId = e.target.value ? Number(e.target.value) : undefined;
+                    setAssignSubId(sId);
+                    const sub = subjectsList.find((s) => s.id === sId);
+                    if (sub) {
+                      if (sub.semester) setAssignSemStr(sub.semester);
+                      if (sub.department_id) setAssignDeptId(sub.department_id);
+                      if (sub.class_name) setAssignClass(sub.class_name);
+                      if (sub.required_hours_per_week) setAssignHours(sub.required_hours_per_week);
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-xl glass-input font-bold"
+                >
+                  <option value="">-- Choose Subject --</option>
+                  {subjectsList.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.code} - {s.name} ({s.semester || 'All'}, {s.is_lab ? 'Lab' : 'Theory'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Semester
+                  </label>
+                  <select
+                    value={assignSemStr}
+                    onChange={(e) => setAssignSemStr(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl glass-input font-bold"
+                  >
+                    {(semestersList.length > 0
+                      ? semestersList.map((s) => s.code || s.name)
+                      : ['S1', 'S3', 'S5', 'S7']
+                    ).map((sem) => (
+                      <option key={sem} value={sem}>
+                        Semester {sem}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Class / Section
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. S3 A"
+                    value={assignClass}
+                    onChange={(e) => setAssignClass(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl glass-input font-semibold"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Required Hours / Wk
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={assignHours}
+                    onChange={(e) => setAssignHours(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl glass-input text-center font-bold text-blue-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold mb-1 text-slate-700 dark:text-slate-300">
+                    Eligible Classroom / Lab
+                  </label>
+                  <select
+                    value={assignRoomId || ''}
+                    onChange={(e) => setAssignRoomId(e.target.value ? Number(e.target.value) : undefined)}
+                    className="w-full px-3 py-2 rounded-xl glass-input"
+                  >
+                    <option value="">-- Any Available Room --</option>
+                    {resources.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} ({r.type})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-200/40 dark:border-slate-800/40">
+              <button
+                type="button"
+                onClick={() => setIsAddAssignModalOpen(false)}
+                className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-semibold shadow-md"
+              >
+                Assign Faculty
               </button>
             </div>
           </form>

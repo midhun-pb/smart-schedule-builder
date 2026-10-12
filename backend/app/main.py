@@ -7,7 +7,7 @@ from app.core.security import hash_password
 from app.models.models import (
     Organization, Department, User, Person, Resource, ShiftTemplate,
     RequirementSlot, Schedule, Assignment, LeaveRequest, Notification, AuditLog, Holiday,
-    ScheduleVersion, Subject
+    ScheduleVersion, Subject, Semester, TeacherSubjectAssignment
 )
 from app.api import (
     auth, organizations, profiles, data_import, schedules, search,
@@ -23,6 +23,13 @@ from sqlalchemy import text
 try:
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE requirement_slots ADD COLUMN subject_id INTEGER"))
+        conn.commit()
+except Exception:
+    pass
+
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE subjects ADD COLUMN semester_id INTEGER"))
         conn.commit()
 except Exception:
     pass
@@ -477,6 +484,30 @@ def seed_subjects_if_needed():
     try:
         colleges = db.query(Organization).filter(Organization.type.in_(["college", "university"])).all()
         for col in colleges:
+            # 1. Seed Semesters if needed
+            sem_data = [
+                ("Semester 1", "S1", "2026-2027"),
+                ("Semester 3", "S3", "2026-2027"),
+                ("Semester 5", "S5", "2026-2027"),
+                ("Semester 7", "S7", "2026-2027"),
+            ]
+            sem_map = {}
+            for s_name, s_code, a_yr in sem_data:
+                sem = db.query(Semester).filter(Semester.org_id == col.id, Semester.code == s_code).first()
+                if not sem:
+                    sem = Semester(
+                        org_id=col.id,
+                        name=s_name,
+                        code=s_code,
+                        academic_year=a_yr,
+                        is_active=True
+                    )
+                    db.add(sem)
+                    db.flush()
+                sem_map[s_code] = sem.id
+            db.commit()
+
+            # 2. Seed Subjects if needed
             if db.query(Subject).filter(Subject.org_id == col.id).count() == 0:
                 cse_dept = db.query(Department).filter(Department.org_id == col.id, Department.code == "CSE").first()
                 c_id = cse_dept.id if cse_dept else None
@@ -489,13 +520,14 @@ def seed_subjects_if_needed():
                     ("Python Programming Lab", "CS202L", "S3", "CSE-B", 2.0, True, "Hands-on scripting, data pipelines, automation."),
                     ("Database Systems Practical Lab", "CS304L", "S5", "CSE-A", 2.0, True, "Practical PostgreSQL query tuning and transactions.")
                 ]
-                for name, code, sem, cname, hrs, is_lab, desc in default_subs:
+                for name, code, sem_code, cname, hrs, is_lab, desc in default_subs:
                     sub = Subject(
                         org_id=col.id,
                         department_id=c_id,
+                        semester_id=sem_map.get(sem_code),
                         name=name,
                         code=code,
-                        semester=sem,
+                        semester=sem_code,
                         class_name=cname,
                         required_hours_per_week=hrs,
                         is_lab=is_lab,
@@ -504,15 +536,58 @@ def seed_subjects_if_needed():
                     db.add(sub)
                 db.commit()
 
-                # Link existing slots to subjects if matched
-                subs = db.query(Subject).filter(Subject.org_id == col.id).all()
-                slots = db.query(RequirementSlot).filter(RequirementSlot.org_id == col.id).all()
-                for sl in slots:
+            # 3. Ensure all subjects have semester_id populated
+            subs = db.query(Subject).filter(Subject.org_id == col.id).all()
+            for s in subs:
+                if not s.semester_id and s.semester in sem_map:
+                    s.semester_id = sem_map[s.semester]
+            db.commit()
+
+            # 4. Seed TeacherSubjectAssignments if none exist
+            if db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == col.id).count() == 0:
+                people = {p.name: p for p in db.query(Person).filter(Person.org_id == col.id).all()}
+                sub_dict = {s.name: s for s in subs}
+                faculty_assignments = [
+                    ("Dr. Eleanor Vance", "Database Management Systems", "S5", "CSE-A", 4.0),
+                    ("Dr. Anita Roy", "Computer Networks", "S5", "CSE-B", 4.0),
+                    ("Dr. Anita Roy", "Operating Systems", "S5", "CSE-A", 4.0),
+                    ("Marcus Thorne", "Python Programming Lab", "S3", "CSE-B", 2.0),
+                    ("Priya Nair", "Database Systems Practical Lab", "S5", "CSE-A", 2.0),
+                    ("Dr. Rajesh Kumar", "Data Structures & Algorithms", "S3", "CSE-A", 4.0),
+                ]
+                for t_name, s_name, sem_code, cname, hrs in faculty_assignments:
+                    t = people.get(t_name)
+                    s = sub_dict.get(s_name)
+                    if t and s:
+                        tsa = TeacherSubjectAssignment(
+                            org_id=col.id,
+                            person_id=t.id,
+                            subject_id=s.id,
+                            department_id=s.department_id,
+                            semester_id=s.semester_id,
+                            semester=sem_code,
+                            class_name=cname,
+                            required_hours=hrs,
+                            is_primary=True
+                        )
+                        db.add(tsa)
+                db.commit()
+
+            # 5. Link existing slots to subjects and populate metadata
+            slots = db.query(RequirementSlot).filter(RequirementSlot.org_id == col.id).all()
+            for sl in slots:
+                if not sl.subject_id:
                     for s in subs:
                         if s.name.lower() in sl.title.lower() or (sl.profession_metadata and sl.profession_metadata.get("subject", "").lower() in s.name.lower()):
                             sl.subject_id = s.id
+                            sl.department_id = s.department_id
+                            meta = dict(sl.profession_metadata or {})
+                            meta["subject"] = s.name
+                            meta["semester"] = s.semester
+                            meta["class"] = s.class_name
+                            sl.profession_metadata = meta
                             break
-                db.commit()
+            db.commit()
     finally:
         db.close()
 

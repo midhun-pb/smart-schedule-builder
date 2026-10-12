@@ -1,15 +1,16 @@
 import pytest
 import datetime
 from fastapi.testclient import TestClient
-from app.main import app, seed_database
+from app.main import app, seed_database, seed_subjects_if_needed
 from app.core.database import SessionLocal
-from app.models.models import Organization, Person, Schedule, RequirementSlot, Assignment, Resource
+from app.models.models import Organization, Person, Schedule, RequirementSlot, Assignment, Resource, Subject, Semester, TeacherSubjectAssignment
 
 client = TestClient(app)
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_db():
     seed_database()
+    seed_subjects_if_needed()
 
 def test_timetable_swap_dry_run_and_execution():
     db = SessionLocal()
@@ -216,4 +217,107 @@ def test_slot_subject_assignment_and_retrieval():
     # Clean up created slot
     del_slot_resp = client.delete(f"/api/schedules/slots/{slot_id}")
     assert del_slot_resp.status_code == 200
+
+def test_semester_management_crud():
+    # 1. List existing semesters (seeded S1, S3, S5, S7)
+    list_resp = client.get("/api/organizations/1/semesters")
+    assert list_resp.status_code == 200
+    sems = list_resp.json()
+    assert len(sems) >= 4
+    codes = [s["code"] for s in sems]
+    assert "S1" in codes
+    assert "S3" in codes
+    assert "S5" in codes
+
+    # 2. Create new semester
+    create_resp = client.post("/api/organizations/1/semesters", json={
+        "name": "Semester 9 (Postgrad)",
+        "code": "S9",
+        "academic_year": "2026-2027",
+        "is_active": True
+    })
+    assert create_resp.status_code == 200
+    created = create_resp.json()
+    sem_id = created["id"]
+    assert created["code"] == "S9"
+
+    # 3. Update semester
+    up_resp = client.put(f"/api/organizations/1/semesters/{sem_id}", json={
+        "name": "Semester 9 (Advanced Research)"
+    })
+    assert up_resp.status_code == 200
+    assert up_resp.json()["name"] == "Semester 9 (Advanced Research)"
+
+    # 4. Delete semester
+    del_resp = client.delete(f"/api/organizations/1/semesters/{sem_id}")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["success"] is True
+
+def test_teacher_subject_assignment_workflow():
+    db = SessionLocal()
+    teacher = db.query(Person).filter(Person.org_id == 1, Person.status == "active").first()
+    subject = db.query(Subject).filter(Subject.org_id == 1, Subject.semester == "S3").first()
+    assert teacher is not None
+    assert subject is not None
+
+    # 1. Assign teacher to subject
+    assign_payload = {
+        "person_id": teacher.id,
+        "subject_id": subject.id,
+        "semester": "S3",
+        "class_name": "S3 A",
+        "required_hours": 4.0,
+        "is_primary": True
+    }
+    assign_resp = client.post("/api/organizations/1/teacher-assignments", json=assign_payload)
+    # May already exist or succeed:
+    if assign_resp.status_code == 400:
+        assert "already assigned" in assign_resp.json()["detail"].lower()
+    else:
+        assert assign_resp.status_code == 200
+        assigned_data = assign_resp.json()
+        assert assigned_data["teacher_name"] == teacher.name
+        assert assigned_data["subject_name"] == subject.name
+        assert assigned_data["class_name"] == "S3 A"
+        assert assigned_data["semester"] == "S3"
+
+        # 2. Duplicate assignment rejection
+        dup_resp = client.post("/api/organizations/1/teacher-assignments", json=assign_payload)
+        assert dup_resp.status_code == 400
+        assert "already assigned" in dup_resp.json()["detail"].lower()
+
+        # 3. Retrieve assignments list
+        list_resp = client.get(f"/api/organizations/1/teacher-assignments?person_id={teacher.id}")
+        assert list_resp.status_code == 200
+        records = list_resp.json()
+        assert any(r["subject_id"] == subject.id for r in records)
+
+        # 4. Clean up assignment
+        assign_id = assigned_data["id"]
+        del_resp = client.delete(f"/api/organizations/1/teacher-assignments/{assign_id}")
+        assert del_resp.status_code == 200
+        assert del_resp.json()["success"] is True
+
+def test_timetable_matrix_semester_enrichment():
+    db = SessionLocal()
+    sched = db.query(Schedule).filter(Schedule.org_id == 1).first()
+    assert sched is not None
+
+    details_resp = client.get(f"/api/schedules/{sched.id}/details")
+    assert details_resp.status_code == 200
+    data = details_resp.json()
+    slots = data["slots"]
+    assert len(slots) > 0
+
+    # Verify that work slots contain subject, semester, class_name, and department_name
+    work_slots = [s for s in slots if s["period_type"] == "work"]
+    assert len(work_slots) > 0
+    for s in work_slots:
+        assert "subject" in s
+        assert "subject_name" in s
+        assert "semester" in s
+        assert "class_name" in s
+        assert "department_name" in s
+        # Prominent subject is not None
+        assert s["subject"] is not None
 

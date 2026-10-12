@@ -3,11 +3,13 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 import datetime
 from app.core.database import get_db
-from app.models.models import Organization, Department, ShiftTemplate, Resource, Schedule, RequirementSlot, User, AuditLog, Subject, Person
+from app.models.models import Organization, Department, ShiftTemplate, Resource, Schedule, RequirementSlot, User, AuditLog, Subject, Person, Semester, TeacherSubjectAssignment
 from app.schemas.schemas import (
     OrganizationCreate, OrganizationResponse,
     DepartmentCreate, DepartmentUpdate, DepartmentResponse,
-    SubjectCreate, SubjectUpdate, SubjectResponse
+    SubjectCreate, SubjectUpdate, SubjectResponse,
+    SemesterCreate, SemesterUpdate, SemesterResponse,
+    TeacherAssignmentCreate, TeacherAssignmentUpdate, TeacherAssignmentResponse
 )
 from pydantic import BaseModel
 
@@ -289,6 +291,134 @@ def delete_department(org_id: int, dept_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"success": True, "message": "Department deleted"}
 
+# --- Semester Management Endpoints ---
+
+@router.get("/{org_id}/semesters")
+def list_organization_semesters(org_id: int, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    semesters = db.query(Semester).filter(Semester.org_id == org_id).order_by(Semester.code.asc()).all()
+    if not semesters and org.type in ["college", "university"]:
+        default_sems = [
+            ("Semester 1", "S1", "2026-2027"),
+            ("Semester 3", "S3", "2026-2027"),
+            ("Semester 5", "S5", "2026-2027"),
+            ("Semester 7", "S7", "2026-2027"),
+        ]
+        for s_name, s_code, a_yr in default_sems:
+            new_sem = Semester(
+                org_id=org_id,
+                name=s_name,
+                code=s_code,
+                academic_year=a_yr,
+                is_active=True
+            )
+            db.add(new_sem)
+        db.commit()
+        semesters = db.query(Semester).filter(Semester.org_id == org_id).order_by(Semester.code.asc()).all()
+
+    sub_counts = {}
+    for sem in semesters:
+        count = db.query(Subject).filter(
+            Subject.org_id == org_id,
+            (Subject.semester_id == sem.id) | (Subject.semester == sem.code)
+        ).count()
+        sub_counts[sem.id] = count
+
+    return [
+        {
+            "id": sem.id,
+            "org_id": sem.org_id,
+            "name": sem.name,
+            "code": sem.code,
+            "academic_year": sem.academic_year,
+            "start_date": sem.start_date,
+            "end_date": sem.end_date,
+            "is_active": sem.is_active,
+            "subject_count": sub_counts.get(sem.id, 0),
+            "created_at": sem.created_at.isoformat() if sem.created_at else None
+        }
+        for sem in semesters
+    ]
+
+@router.post("/{org_id}/semesters")
+def create_semester(org_id: int, payload: SemesterCreate, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    clean_name = payload.name.strip()
+    clean_code = (payload.code.strip() if payload.code else clean_name[:4].upper()).replace(" ", "")
+    if not clean_name or not clean_code:
+        raise HTTPException(status_code=400, detail="Semester name and code are required")
+
+    sem = Semester(
+        org_id=org_id,
+        name=clean_name,
+        code=clean_code,
+        academic_year=payload.academic_year or "2026-2027",
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        is_active=payload.is_active
+    )
+    db.add(sem)
+    db.commit()
+    db.refresh(sem)
+    return {
+        "id": sem.id,
+        "org_id": sem.org_id,
+        "name": sem.name,
+        "code": sem.code,
+        "academic_year": sem.academic_year,
+        "start_date": sem.start_date,
+        "end_date": sem.end_date,
+        "is_active": sem.is_active,
+        "subject_count": 0
+    }
+
+@router.put("/{org_id}/semesters/{semester_id}")
+def update_semester(org_id: int, semester_id: int, payload: SemesterUpdate, db: Session = Depends(get_db)):
+    sem = db.query(Semester).filter(Semester.id == semester_id, Semester.org_id == org_id).first()
+    if not sem:
+        raise HTTPException(status_code=404, detail="Semester not found")
+
+    if payload.name is not None and payload.name.strip():
+        sem.name = payload.name.strip()
+    if payload.code is not None and payload.code.strip():
+        sem.code = payload.code.strip()
+    if payload.academic_year is not None:
+        sem.academic_year = payload.academic_year.strip()
+    if payload.start_date is not None:
+        sem.start_date = payload.start_date
+    if payload.end_date is not None:
+        sem.end_date = payload.end_date
+    if payload.is_active is not None:
+        sem.is_active = payload.is_active
+
+    db.commit()
+    return {
+        "id": sem.id,
+        "org_id": sem.org_id,
+        "name": sem.name,
+        "code": sem.code,
+        "academic_year": sem.academic_year,
+        "start_date": sem.start_date,
+        "end_date": sem.end_date,
+        "is_active": sem.is_active
+    }
+
+@router.delete("/{org_id}/semesters/{semester_id}")
+def delete_semester(org_id: int, semester_id: int, db: Session = Depends(get_db)):
+    sem = db.query(Semester).filter(Semester.id == semester_id, Semester.org_id == org_id).first()
+    if not sem:
+        raise HTTPException(status_code=404, detail="Semester not found")
+
+    db.delete(sem)
+    db.commit()
+    return {"success": True, "message": "Semester deleted successfully"}
+
 # --- Subject Management Endpoints ---
 
 @router.get("/{org_id}/subjects")
@@ -296,6 +426,7 @@ def list_organization_subjects(
     org_id: int,
     department_id: Optional[int] = None,
     semester: Optional[str] = None,
+    semester_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(Subject).filter(Subject.org_id == org_id)
@@ -303,15 +434,34 @@ def list_organization_subjects(
         query = query.filter(Subject.department_id == department_id)
     if semester:
         query = query.filter(Subject.semester == semester)
+    if semester_id:
+        query = query.filter(Subject.semester_id == semester_id)
     subjects = query.order_by(Subject.name.asc()).all()
     
     dept_map = {d.id: d.name for d in db.query(Department).filter(Department.org_id == org_id).all()}
+    sem_map = {s.id: s.name for s in db.query(Semester).filter(Semester.org_id == org_id).all()}
+    
+    # Pre-fetch teacher-subject assignments
+    teacher_assigns = db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == org_id).all()
+    teacher_map = {}
+    for ta in teacher_assigns:
+        teacher_map.setdefault(ta.subject_id, []).append({
+            "assignment_id": ta.id,
+            "person_id": ta.person_id,
+            "teacher_name": ta.teacher.name if ta.teacher else "Unassigned",
+            "semester": ta.semester,
+            "class_name": ta.class_name,
+            "required_hours": ta.required_hours
+        })
+
     return [
         {
             "id": s.id,
             "org_id": s.org_id,
             "department_id": s.department_id,
             "department_name": dept_map.get(s.department_id, "General"),
+            "semester_id": s.semester_id,
+            "semester_name": sem_map.get(s.semester_id, s.semester or "Semester"),
             "name": s.name,
             "code": s.code,
             "semester": s.semester,
@@ -319,6 +469,7 @@ def list_organization_subjects(
             "required_hours_per_week": s.required_hours_per_week,
             "is_lab": s.is_lab,
             "description": s.description,
+            "assigned_teachers": teacher_map.get(s.id, []),
             "created_at": s.created_at.isoformat() if s.created_at else None
         }
         for s in subjects
@@ -336,12 +487,20 @@ def create_subject(org_id: int, payload: SubjectCreate, db: Session = Depends(ge
 
     clean_code = (payload.code.strip() if payload.code else clean_name[:4].upper()).replace(" ", "")
 
+    sem_id = payload.semester_id
+    sem_str = payload.semester.strip() if payload.semester else None
+    if not sem_id and sem_str:
+        sem_obj = db.query(Semester).filter(Semester.org_id == org_id, Semester.code == sem_str).first()
+        if sem_obj:
+            sem_id = sem_obj.id
+
     sub = Subject(
         org_id=org_id,
         department_id=payload.department_id,
+        semester_id=sem_id,
         name=clean_name,
         code=clean_code,
-        semester=payload.semester.strip() if payload.semester else None,
+        semester=sem_str,
         class_name=payload.class_name.strip() if payload.class_name else None,
         required_hours_per_week=payload.required_hours_per_week or 4.0,
         is_lab=bool(payload.is_lab),
@@ -354,6 +513,7 @@ def create_subject(org_id: int, payload: SubjectCreate, db: Session = Depends(ge
         "id": sub.id,
         "org_id": sub.org_id,
         "department_id": sub.department_id,
+        "semester_id": sub.semester_id,
         "name": sub.name,
         "code": sub.code,
         "semester": sub.semester,
@@ -375,6 +535,8 @@ def update_subject(org_id: int, subject_id: int, payload: SubjectUpdate, db: Ses
         sub.code = payload.code.strip()
     if payload.department_id is not None:
         sub.department_id = payload.department_id
+    if payload.semester_id is not None:
+        sub.semester_id = payload.semester_id
     if payload.semester is not None:
         sub.semester = payload.semester.strip()
     if payload.class_name is not None:
@@ -391,6 +553,7 @@ def update_subject(org_id: int, subject_id: int, payload: SubjectUpdate, db: Ses
         "id": sub.id,
         "org_id": sub.org_id,
         "department_id": sub.department_id,
+        "semester_id": sub.semester_id,
         "name": sub.name,
         "code": sub.code,
         "semester": sub.semester,
@@ -409,6 +572,155 @@ def delete_subject(org_id: int, subject_id: int, db: Session = Depends(get_db)):
     db.delete(sub)
     db.commit()
     return {"success": True, "message": "Subject deleted"}
+
+# --- Teacher-Subject Assignment Endpoints ---
+
+@router.get("/{org_id}/teacher-assignments")
+def list_teacher_assignments(
+    org_id: int,
+    person_id: Optional[int] = None,
+    subject_id: Optional[int] = None,
+    semester: Optional[str] = None,
+    department_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == org_id)
+    if person_id:
+        query = query.filter(TeacherSubjectAssignment.person_id == person_id)
+    if subject_id:
+        query = query.filter(TeacherSubjectAssignment.subject_id == subject_id)
+    if semester:
+        query = query.filter(TeacherSubjectAssignment.semester == semester)
+    if department_id:
+        query = query.filter(TeacherSubjectAssignment.department_id == department_id)
+
+    assignments = query.all()
+    return [
+        {
+            "id": a.id,
+            "org_id": a.org_id,
+            "person_id": a.person_id,
+            "teacher_name": a.teacher.name if a.teacher else "Unknown",
+            "subject_id": a.subject_id,
+            "subject_name": a.subject.name if a.subject else "Unknown",
+            "subject_code": a.subject.code if a.subject else "",
+            "department_id": a.department_id,
+            "department_name": a.department.name if a.department else "General",
+            "semester_id": a.semester_id,
+            "semester": a.semester or (a.semester_rel.code if a.semester_rel else None),
+            "class_name": a.class_name,
+            "required_hours": a.required_hours,
+            "eligible_rooms": a.eligible_rooms or [],
+            "is_primary": a.is_primary,
+            "created_at": a.created_at.isoformat() if a.created_at else None
+        }
+        for a in assignments
+    ]
+
+@router.post("/{org_id}/teacher-assignments")
+def create_teacher_assignment(org_id: int, payload: TeacherAssignmentCreate, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    teacher = db.query(Person).filter(Person.id == payload.person_id, Person.org_id == org_id).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    subject = db.query(Subject).filter(Subject.id == payload.subject_id, Subject.org_id == org_id).first()
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    # Prevent duplicate assignment for same teacher + subject + class
+    existing = db.query(TeacherSubjectAssignment).filter(
+        TeacherSubjectAssignment.org_id == org_id,
+        TeacherSubjectAssignment.person_id == payload.person_id,
+        TeacherSubjectAssignment.subject_id == payload.subject_id,
+        TeacherSubjectAssignment.class_name == payload.class_name
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="This teacher is already assigned to this subject for this class")
+
+    sem_val = payload.semester or subject.semester
+    dept_id = payload.department_id or subject.department_id or teacher.department_id
+    sem_id = payload.semester_id or subject.semester_id
+
+    assign = TeacherSubjectAssignment(
+        org_id=org_id,
+        person_id=payload.person_id,
+        subject_id=payload.subject_id,
+        department_id=dept_id,
+        semester_id=sem_id,
+        semester=sem_val,
+        class_name=payload.class_name or subject.class_name,
+        required_hours=payload.required_hours or subject.required_hours_per_week or 4.0,
+        eligible_rooms=payload.eligible_rooms or [],
+        is_primary=payload.is_primary
+    )
+    db.add(assign)
+    db.commit()
+    db.refresh(assign)
+
+    return {
+        "id": assign.id,
+        "org_id": assign.org_id,
+        "person_id": assign.person_id,
+        "teacher_name": teacher.name,
+        "subject_id": assign.subject_id,
+        "subject_name": subject.name,
+        "subject_code": subject.code,
+        "department_id": assign.department_id,
+        "semester_id": assign.semester_id,
+        "semester": assign.semester,
+        "class_name": assign.class_name,
+        "required_hours": assign.required_hours,
+        "eligible_rooms": assign.eligible_rooms,
+        "is_primary": assign.is_primary
+    }
+
+@router.put("/{org_id}/teacher-assignments/{assignment_id}")
+def update_teacher_assignment(org_id: int, assignment_id: int, payload: TeacherAssignmentUpdate, db: Session = Depends(get_db)):
+    assign = db.query(TeacherSubjectAssignment).filter(
+        TeacherSubjectAssignment.id == assignment_id,
+        TeacherSubjectAssignment.org_id == org_id
+    ).first()
+    if not assign:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    if payload.person_id is not None:
+        assign.person_id = payload.person_id
+    if payload.subject_id is not None:
+        assign.subject_id = payload.subject_id
+    if payload.department_id is not None:
+        assign.department_id = payload.department_id
+    if payload.semester_id is not None:
+        assign.semester_id = payload.semester_id
+    if payload.semester is not None:
+        assign.semester = payload.semester
+    if payload.class_name is not None:
+        assign.class_name = payload.class_name
+    if payload.required_hours is not None:
+        assign.required_hours = payload.required_hours
+    if payload.eligible_rooms is not None:
+        assign.eligible_rooms = payload.eligible_rooms
+    if payload.is_primary is not None:
+        assign.is_primary = payload.is_primary
+
+    db.commit()
+    return {"success": True, "id": assign.id}
+
+@router.delete("/{org_id}/teacher-assignments/{assignment_id}")
+def delete_teacher_assignment(org_id: int, assignment_id: int, db: Session = Depends(get_db)):
+    assign = db.query(TeacherSubjectAssignment).filter(
+        TeacherSubjectAssignment.id == assignment_id,
+        TeacherSubjectAssignment.org_id == org_id
+    ).first()
+    if not assign:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    db.delete(assign)
+    db.commit()
+    return {"success": True, "message": "Teacher subject assignment deleted successfully"}
 
 # --- Roster Readiness Checklist ---
 

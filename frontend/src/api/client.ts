@@ -67,11 +67,22 @@ class ApiClient {
   deleteDepartment = (orgId: number, deptId: number) =>
     this.request<any>(`/organizations/${orgId}/departments/${deptId}`, { method: 'DELETE' });
 
+  // Semesters
+  getSemesters = (orgId: number) =>
+    this.request<any[]>(`/organizations/${orgId}/semesters`);
+  createSemester = (orgId: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/semesters`, { method: 'POST', body: JSON.stringify(data) });
+  updateSemester = (orgId: number, id: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/semesters/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+  deleteSemester = (orgId: number, id: number) =>
+    this.request<any>(`/organizations/${orgId}/semesters/${id}`, { method: 'DELETE' });
+
   // Subjects
-  getSubjects = (orgId: number, params?: { department_id?: number; semester?: string }) => {
+  getSubjects = (orgId: number, params?: { department_id?: number; semester?: string; semester_id?: number }) => {
     const query = new URLSearchParams();
     if (params?.department_id) query.append('department_id', String(params.department_id));
     if (params?.semester) query.append('semester', params.semester);
+    if (params?.semester_id) query.append('semester_id', String(params.semester_id));
     const qs = query.toString() ? `?${query.toString()}` : '';
     return this.request<any[]>(`/organizations/${orgId}/subjects${qs}`);
   };
@@ -81,6 +92,22 @@ class ApiClient {
     this.request<any>(`/organizations/${orgId}/subjects/${subjectId}`, { method: 'PUT', body: JSON.stringify(data) });
   deleteSubject = (orgId: number, subjectId: number) =>
     this.request<any>(`/organizations/${orgId}/subjects/${subjectId}`, { method: 'DELETE' });
+
+  // Teacher-Subject Assignments
+  getTeacherAssignments = (orgId: number, params?: { person_id?: number; subject_id?: number; semester?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.person_id) query.append('person_id', String(params.person_id));
+    if (params?.subject_id) query.append('subject_id', String(params.subject_id));
+    if (params?.semester) query.append('semester', params.semester);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    return this.request<any[]>(`/organizations/${orgId}/teacher-assignments${qs}`);
+  };
+  createTeacherAssignment = (orgId: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/teacher-assignments`, { method: 'POST', body: JSON.stringify(data) });
+  updateTeacherAssignment = (orgId: number, id: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/teacher-assignments/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+  deleteTeacherAssignment = (orgId: number, id: number) =>
+    this.request<any>(`/organizations/${orgId}/teacher-assignments/${id}`, { method: 'DELETE' });
 
   // Roster Readiness
   getRosterReadiness = (orgId: number) =>

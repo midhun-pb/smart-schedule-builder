@@ -24,6 +24,8 @@ class Organization(Base):
     schedules = relationship("Schedule", back_populates="organization", cascade="all, delete-orphan")
     holidays = relationship("Holiday", back_populates="organization", cascade="all, delete-orphan")
     subjects = relationship("Subject", back_populates="organization", cascade="all, delete-orphan")
+    semesters = relationship("Semester", back_populates="organization", cascade="all, delete-orphan")
+    teacher_subject_assignments = relationship("TeacherSubjectAssignment", back_populates="organization", cascade="all, delete-orphan")
 
 
 class Department(Base):
@@ -39,12 +41,31 @@ class Department(Base):
     people = relationship("Person", back_populates="department")
 
 
+class Semester(Base):
+    __tablename__ = "semesters"
+
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(100), nullable=False)         # "Semester 1", "Semester 3", "Semester 5"
+    code = Column(String(20), nullable=False)          # "S1", "S3", "S5", "S7"
+    academic_year = Column(String(50), nullable=True)  # "2026-2027"
+    start_date = Column(String(20), nullable=True)
+    end_date = Column(String(20), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utc_now)
+
+    organization = relationship("Organization", back_populates="semesters")
+    subjects = relationship("Subject", back_populates="semester_rel", cascade="all, delete-orphan")
+    teacher_assignments = relationship("TeacherSubjectAssignment", back_populates="semester_rel", cascade="all, delete-orphan")
+
+
 class Subject(Base):
     __tablename__ = "subjects"
 
     id = Column(Integer, primary_key=True, index=True)
     org_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    semester_id = Column(Integer, ForeignKey("semesters.id", ondelete="SET NULL"), nullable=True)
     name = Column(String(150), nullable=False)
     code = Column(String(50), nullable=False)
     semester = Column(String(20), nullable=True)  # e.g., "S5"
@@ -56,6 +77,31 @@ class Subject(Base):
 
     organization = relationship("Organization", back_populates="subjects")
     department = relationship("Department")
+    semester_rel = relationship("Semester", back_populates="subjects")
+    teacher_assignments = relationship("TeacherSubjectAssignment", back_populates="subject", cascade="all, delete-orphan")
+
+
+class TeacherSubjectAssignment(Base):
+    __tablename__ = "teacher_subject_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    person_id = Column(Integer, ForeignKey("people.id", ondelete="CASCADE"), nullable=False)  # teacher
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    semester_id = Column(Integer, ForeignKey("semesters.id", ondelete="SET NULL"), nullable=True)
+    semester = Column(String(20), nullable=True)   # "S1", "S3", "S5"
+    class_name = Column(String(50), nullable=True) # "S3 A", "S5 CSE-A"
+    required_hours = Column(Float, default=4.0)
+    eligible_rooms = Column(JSON, default=list)    # list of resource IDs
+    is_primary = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utc_now)
+
+    organization = relationship("Organization", back_populates="teacher_subject_assignments")
+    teacher = relationship("Person", back_populates="teacher_subject_assignments")
+    subject = relationship("Subject", back_populates="teacher_assignments")
+    department = relationship("Department")
+    semester_rel = relationship("Semester", back_populates="teacher_assignments")
 
 
 class User(Base):
@@ -109,6 +155,7 @@ class Person(Base):
     availability_rules = relationship("AvailabilityRule", back_populates="person", cascade="all, delete-orphan")
     leave_requests = relationship("LeaveRequest", back_populates="person", cascade="all, delete-orphan")
     assignments = relationship("Assignment", back_populates="person", foreign_keys="Assignment.person_id")
+    teacher_subject_assignments = relationship("TeacherSubjectAssignment", back_populates="teacher", cascade="all, delete-orphan")
 
 
 class Resource(Base):

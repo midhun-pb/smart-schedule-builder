@@ -34,6 +34,8 @@ export interface Subject {
   org_id: number;
   department_id?: number;
   department_name?: string;
+  semester_id?: number;
+  semester_name?: string;
   name: string;
   code: string;
   semester?: string;
@@ -41,6 +43,39 @@ export interface Subject {
   required_hours_per_week?: number;
   is_lab?: boolean;
   description?: string;
+  assigned_teachers?: any[];
+  created_at?: string;
+}
+
+export interface Semester {
+  id: number;
+  org_id: number;
+  name: string;
+  code: string;
+  academic_year?: string;
+  start_date?: string;
+  end_date?: string;
+  is_active: boolean;
+  subject_count?: number;
+  created_at?: string;
+}
+
+export interface TeacherSubjectAssignment {
+  id: number;
+  org_id: number;
+  person_id: number;
+  teacher_name?: string;
+  subject_id: number;
+  subject_name?: string;
+  subject_code?: string;
+  department_id?: number;
+  department_name?: string;
+  semester_id?: number;
+  semester?: string;
+  class_name?: string;
+  required_hours: number;
+  eligible_rooms?: number[];
+  is_primary?: boolean;
   created_at?: string;
 }
 
@@ -114,6 +149,9 @@ export interface TimetableSlot {
   subject_id?: number;
   subject?: string;
   subject_name?: string;
+  subject_code?: string;
+  semester?: string;
+  class_name?: string;
   required_skills: string[];
   required_qualifications: string[];
   profession_metadata: Record<string, any>;

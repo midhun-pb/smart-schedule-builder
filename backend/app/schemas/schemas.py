@@ -63,11 +63,40 @@ class DepartmentResponse(DepartmentBase):
     class Config:
         from_attributes = True
 
+# Semester
+class SemesterBase(BaseModel):
+    name: str                               # e.g. "Semester 3"
+    code: str                               # e.g. "S3"
+    academic_year: Optional[str] = "2026-2027"
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    is_active: bool = True
+
+class SemesterCreate(SemesterBase):
+    org_id: Optional[int] = None
+
+class SemesterUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    academic_year: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class SemesterResponse(SemesterBase):
+    id: int
+    org_id: int
+    subject_count: Optional[int] = 0
+    created_at: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
 # Subject
 class SubjectBase(BaseModel):
     name: str
     code: str
     department_id: Optional[int] = None
+    semester_id: Optional[int] = None
     semester: Optional[str] = None
     class_name: Optional[str] = None
     required_hours_per_week: float = 4.0
@@ -81,6 +110,7 @@ class SubjectUpdate(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
     department_id: Optional[int] = None
+    semester_id: Optional[int] = None
     semester: Optional[str] = None
     class_name: Optional[str] = None
     required_hours_per_week: Optional[float] = None
@@ -90,6 +120,43 @@ class SubjectUpdate(BaseModel):
 class SubjectResponse(SubjectBase):
     id: int
     org_id: int
+    created_at: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+# Teacher-Subject Assignment
+class TeacherAssignmentBase(BaseModel):
+    person_id: int                          # teacher
+    subject_id: int
+    department_id: Optional[int] = None
+    semester_id: Optional[int] = None
+    semester: Optional[str] = None          # "S3"
+    class_name: Optional[str] = None        # "S3 A"
+    required_hours: float = 4.0
+    eligible_rooms: List[int] = []
+    is_primary: bool = True
+
+class TeacherAssignmentCreate(TeacherAssignmentBase):
+    org_id: Optional[int] = None
+
+class TeacherAssignmentUpdate(BaseModel):
+    person_id: Optional[int] = None
+    subject_id: Optional[int] = None
+    department_id: Optional[int] = None
+    semester_id: Optional[int] = None
+    semester: Optional[str] = None
+    class_name: Optional[str] = None
+    required_hours: Optional[float] = None
+    eligible_rooms: Optional[List[int]] = None
+    is_primary: Optional[bool] = None
+
+class TeacherAssignmentResponse(TeacherAssignmentBase):
+    id: int
+    org_id: int
+    teacher_name: Optional[str] = None
+    subject_name: Optional[str] = None
+    subject_code: Optional[str] = None
+    department_name: Optional[str] = None
     created_at: Optional[datetime] = None
     class Config:
         from_attributes = True

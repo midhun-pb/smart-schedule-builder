@@ -147,13 +147,16 @@ class SchedulingEngine:
         overtime_penalty_weight: float = 1.0,
         holidays: List[Dict[str, Any]] = None,
         holiday_exceptions: List[Dict[str, Any]] = None,
+        teacher_assignments: List[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Solves the scheduling optimization problem using Google OR-Tools CP-SAT.
-        Enforces working days, leaves, qualifications, and holiday restrictions.
+        Enforces working days, leaves, qualifications, holiday restrictions,
+        and semester-wise teacher-subject assignments.
         """
         holidays = holidays or []
         holiday_exceptions = holiday_exceptions or []
+        teacher_assignments = teacher_assignments or []
 
         if not slots or not people:
             return {
@@ -168,12 +171,22 @@ class SchedulingEngine:
         num_slots = len(slots)
         num_people = len(people)
 
+        # Build lookup for teacher-subject assignments: subject_id -> set of eligible person_ids
+        teacher_subject_map: Dict[int, set] = {}
+        for ta in teacher_assignments:
+            t_id = ta.get("person_id")
+            s_id = ta.get("subject_id")
+            if t_id and s_id:
+                teacher_subject_map.setdefault(s_id, set()).add(t_id)
+
         # Pre-filter candidate eligibility matrix: slot_idx -> list of eligible person_idx
         eligible_candidates: Dict[int, List[int]] = {}
         disqualification_reasons: Dict[Tuple[int, int], str] = {}
 
         for s_idx, slot in enumerate(slots):
             eligible_candidates[s_idx] = []
+            slot_sub_id = slot.get("subject_id") or (slot.get("profession_metadata") or {}).get("subject_id")
+
             for p_idx, person in enumerate(people):
                 p_id = person.get("id")
                 # 0. Holiday check
@@ -186,12 +199,20 @@ class SchedulingEngine:
                 if self._is_on_leave(p_id, slot, leave_records):
                     disqualification_reasons[(s_idx, p_idx)] = "On leave or unavailable"
                     continue
-                # 2. Skill & Qualification hard check
+
+                # 2. Dedicated Teacher-Subject Assignment check
+                if slot_sub_id and slot_sub_id in teacher_subject_map:
+                    if p_id not in teacher_subject_map[slot_sub_id]:
+                        disqualification_reasons[(s_idx, p_idx)] = "Not assigned to teach this subject"
+                        continue
+
+                # 3. Skill & Qualification hard check
                 qualified, reason = self._is_qualified(person, slot)
                 if not qualified:
                     disqualification_reasons[(s_idx, p_idx)] = reason
                     continue
-                # 3. Profession specific metadata check (e.g. lab capability, semesters)
+
+                # 4. Profession specific metadata check (e.g. lab capability, semesters)
                 prof_meta = person.get("profession_metadata", {})
                 slot_meta = slot.get("profession_metadata", {})
                 if slot_meta.get("lab") and not prof_meta.get("theory_lab") in ["both", "lab", True]:
@@ -238,6 +259,27 @@ class SchedulingEngine:
 
                     if is_overlapping_interval(s1_start, s1_end, s2_start, s2_end):
                         model.Add(x[(s1_idx, p_idx)] + x[(s2_idx, p_idx)] <= 1)
+
+        # Hard Constraint: No student class/section can be scheduled for two subjects at the same time
+        class_slots: Dict[str, List[int]] = {}
+        for s_idx, s in enumerate(slots):
+            c_name = s.get("class_name") or (s.get("profession_metadata") or {}).get("class") or (s.get("profession_metadata") or {}).get("class_name")
+            if c_name:
+                class_slots.setdefault(str(c_name).strip().lower(), []).append(s_idx)
+
+        for c_name, c_s_indices in class_slots.items():
+            num_c = len(c_s_indices)
+            for i in range(num_c):
+                s1_idx = c_s_indices[i]
+                s1_start, s1_end, _ = slot_intervals[s1_idx]
+                for j in range(i + 1, num_c):
+                    s2_idx = c_s_indices[j]
+                    s2_start, s2_end, _ = slot_intervals[s2_idx]
+                    if is_overlapping_interval(s1_start, s1_end, s2_start, s2_end):
+                        s1_vars = [x[(s1_idx, p_idx)] for p_idx in eligible_candidates[s1_idx]]
+                        s2_vars = [x[(s2_idx, p_idx)] for p_idx in eligible_candidates[s2_idx]]
+                        if s1_vars and s2_vars:
+                            model.Add(sum(s1_vars) + sum(s2_vars) <= 1)
 
         # Hard Constraint: Max working hours per week per person
         person_workload_vars = []
