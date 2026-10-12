@@ -194,6 +194,40 @@ class ApiClient {
   approveSwap = (swapId: number) =>
     this.request<any>(`/replacements/swaps/${swapId}/approve`, { method: 'POST' });
 
+  // Timetable Drag-and-Drop and Direct Swapping
+  timetableSwap = (payload: {
+    schedule_id: number;
+    source_slot_id: number;
+    target_slot_id: number;
+    reason?: string;
+    dry_run?: boolean;
+    approved_by?: string;
+  }) =>
+    this.request<any>('/replacements/timetable-swap', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+  // College / University Lab Session Scheduling
+  addLabSession = (
+    scheduleId: number,
+    payload: {
+      teacher_id: number;
+      subject: string;
+      date_str: string;
+      start_time: string;
+      end_time: string;
+      resource_id?: number;
+      department_id?: number;
+      semester?: string;
+      class_name?: string;
+    }
+  ) =>
+    this.request<any>(`/schedules/${scheduleId}/add-lab`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
   // Leave
   getLeaves = (orgId: number) =>
     this.request<any[]>(`/leave?org_id=${orgId}`);

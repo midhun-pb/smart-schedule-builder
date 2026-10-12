@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from app.core.database import get_db
 from app.models.models import Assignment, RequirementSlot, Person, ReplacementLog, SwapRequest, AuditLog, Notification
 from app.schemas.schemas import ReplacementRecommendRequest, ReplacementApproveRequest
@@ -16,6 +16,14 @@ class CreateSwapRequest(BaseModel):
     target_person_id: int
     target_assignment_id: int
     reason: str
+
+class TimetableSwapRequest(BaseModel):
+    schedule_id: int
+    source_slot_id: int
+    target_slot_id: int
+    reason: Optional[str] = "Timetable assignment swap"
+    dry_run: Optional[bool] = False
+    approved_by: Optional[str] = "Timetable Manager"
 
 @router.get("/active")
 def get_active_replacements(org_id: int, db: Session = Depends(get_db)):
@@ -225,3 +233,21 @@ def approve_swap(swap_id: int, db: Session = Depends(get_db)):
     swap.status = "approved"
     db.commit()
     return {"success": True, "message": "Swap approved and assignments exchanged."}
+
+@router.post("/timetable-swap")
+def execute_timetable_swap(req: TimetableSwapRequest, db: Session = Depends(get_db)):
+    """
+    Drag-and-drop & click-based assignment swapping directly in the timetable.
+    Validates qualifications, availability, leave, working-hour limits, and conflicts.
+    Supports dry_run=True for instant preview and validation before confirming.
+    """
+    res = ReplacementEngine.validate_and_execute_timetable_swap(
+        db=db,
+        schedule_id=req.schedule_id,
+        source_slot_id=req.source_slot_id,
+        target_slot_id=req.target_slot_id,
+        reason=req.reason or "Timetable assignment swap",
+        dry_run=bool(req.dry_run),
+        approved_by=req.approved_by or "Timetable Manager"
+    )
+    return res

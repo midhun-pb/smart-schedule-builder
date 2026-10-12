@@ -139,7 +139,7 @@ def get_default_profession_settings(org_type: str) -> Dict[str, Any]:
 PRESET_ORGANIZATIONS = [
     {
         "type": "college",
-        "name": "College / University",
+        "name": "University / College",
         "icon": "GraduationCap",
         "description": "Semester-based timetable, theory vs lab periods, faculty workload limits, and subject specializations.",
         "default_departments": ["Computer Science & Eng", "Electronics & Comm", "Mechanical Eng", "Mathematics", "Humanities"],
@@ -158,134 +158,14 @@ PRESET_ORGANIZATIONS = [
         "resource_types": ["Conference Room Alpha", "Boardroom", "Podcast Studio", "Quiet Pod"]
     },
     {
-        "type": "hospital",
-        "name": "Hospital / Healthcare",
-        "icon": "Activity",
-        "description": "24/7 rotating shifts, ICU & ER staffing ratios, specialized surgeon on-calls, and doctor availability.",
-        "default_departments": ["Emergency Room (ER)", "Intensive Care Unit (ICU)", "Cardiology", "Pediatrics", "Radiology"],
-        "default_roles": ["Chief Resident", "Staff Physician", "Registered Nurse (RN)", "Critical Care Specialist", "Triage Nurse"],
-        "profession_label": "Clinician / Doctor / Nurse",
-        "resource_types": ["Operating Room 1", "Trauma Bay", "ICU Ward Bed 1-4", "MRI Suite"]
-    },
-    {
-        "type": "factory",
-        "name": "Factory / Manufacturing",
-        "icon": "Factory",
-        "description": "Continuous production lines, assembly line shifts, machine maintenance windows, and safety certs.",
-        "default_departments": ["Assembly Line A", "Assembly Line B", "Quality Assurance", "Maintenance & Tooling", "Logistics"],
-        "default_roles": ["Line Supervisor", "Machine Operator", "Quality Inspector", "Safety Officer"],
-        "profession_label": "Technician / Operator",
-        "resource_types": ["Assembly Line 1", "Assembly Line 2", "CNC Workstation", "Testing Bay"]
-    },
-    {
         "type": "airline",
-        "name": "Airline / Aviation",
+        "name": "Aviation / Airline",
         "icon": "Plane",
         "description": "Flight crew pairing, FAA rest regulations, captain/first-officer certifications, and cabin attendants.",
         "default_departments": ["Flight Operations", "Cabin Crew", "Ground Operations", "Maintenance Dispatch"],
         "default_roles": ["Captain", "First Officer", "Lead Flight Attendant", "Cabin Crew Member", "Dispatcher"],
         "profession_label": "Flight Crew / Pilot",
         "resource_types": ["Boeing 737-800 Gate A1", "Airbus A320 Gate B4", "Crew Briefing Room"]
-    },
-    {
-        "type": "railway",
-        "name": "Railway / Transit",
-        "icon": "Train",
-        "description": "Locomotive pilot schedules, track maintenance blocks, signal controllers, and station masters.",
-        "default_departments": ["Locomotive Operations", "Signal & Telecom", "Station Operations", "Rolling Stock"],
-        "default_roles": ["Locomotive Pilot", "Assistant Pilot", "Station Master", "Signal Controller"],
-        "profession_label": "Railway Staff",
-        "resource_types": ["Platform 1", "Platform 2", "Control Cabin", "Locomotive 4022"]
-    },
-    {
-        "type": "hotel",
-        "name": "Hotel / Hospitality",
-        "icon": "Hotel",
-        "description": "Guest service desks, housekeeping room turnovers, concierge, and banquet staffing.",
-        "default_departments": ["Front Office", "Housekeeping", "Food & Beverage", "Concierge & Valet"],
-        "default_roles": ["Front Desk Lead", "Concierge", "Floor Supervisor", "Housekeeping Attendant"],
-        "profession_label": "Hospitality Staff",
-        "resource_types": ["Grand Ballroom", "Executive Lounge", "Front Desk Desk 1", "Service Bay"]
-    },
-    {
-        "type": "restaurant",
-        "name": "Restaurant / Dining",
-        "icon": "Utensils",
-        "description": "Front of house, head chef line stations, prep shifts, and peak dinner rush coverages.",
-        "default_departments": ["Kitchen / BOH", "Dining Floor / FOH", "Bar & Beverage", "Pastry & Prep"],
-        "default_roles": ["Head Chef", "Sous Chef", "Line Cook", "Head Waiter", "Sommelier"],
-        "profession_label": "Culinary / Dining Staff",
-        "resource_types": ["Main Kitchen Station 1", "Prep Station", "Bar Station", "Private Dining Room"]
-    },
-    {
-        "type": "police",
-        "name": "Police Department",
-        "icon": "Shield",
-        "description": "Beat patrols, detective investigations, dispatch command desk, and rapid response units.",
-        "default_departments": ["Patrol Division", "Detective Bureau", "Traffic Enforcement", "Dispatch & Comms"],
-        "default_roles": ["Sergeant", "Patrol Officer", "Lead Detective", "Dispatch Officer"],
-        "profession_label": "Officer / Detective",
-        "resource_types": ["Patrol Unit Alpha", "Patrol Unit Bravo", "Briefing Room", "Holding Station"]
-    },
-    {
-        "type": "fire_department",
-        "name": "Fire Department / Rescue",
-        "icon": "Flame",
-        "description": "24-hour apparatus shifts, ladder truck crews, paramedical first responders, and emergency hazard teams.",
-        "default_departments": ["Engine 1 Company", "Ladder 4 Company", "Rescue & Paramedic", "Hazard Inspection"],
-        "default_roles": ["Captain", "Lieutenant", "Firefighter / Paramedic", "Driver / Engineer"],
-        "profession_label": "Firefighter / Paramedic",
-        "resource_types": ["Engine Truck 1", "Ladder Truck 4", "Rescue Ambulance 2", "Station Quarters"]
-    },
-    {
-        "type": "logistics",
-        "name": "Transport & Logistics",
-        "icon": "Truck",
-        "description": "Fleet dispatch, long-haul driver rest schedules, warehouse sorting, and route optimization.",
-        "default_departments": ["Fleet Transport", "Warehouse Operations", "Sortation Hub", "Last-Mile Delivery"],
-        "default_roles": ["Fleet Driver (Heavy)", "Warehouse Supervisor", "Forklift Specialist", "Route Dispatcher"],
-        "profession_label": "Driver / Logistics Specialist",
-        "resource_types": ["Semi-Trailer 104", "Loading Dock A", "Loading Dock B", "Sorting Belt 1"]
-    },
-    {
-        "type": "retail",
-        "name": "Retail / Store",
-        "icon": "ShoppingBag",
-        "description": "Floor visual merchandising, cash register lanes, inventory stockrooms, and peak weekend staffing.",
-        "default_departments": ["Sales Floor", "Cashier & Checkout", "Inventory & Stock", "Customer Service"],
-        "default_roles": ["Store Lead", "Assistant Manager", "Cashier", "Merchandiser"],
-        "profession_label": "Retail Associate",
-        "resource_types": ["Checkout Lane 1", "Checkout Lane 2", "Customer Service Desk", "Stockroom"]
-    },
-    {
-        "type": "construction",
-        "name": "Construction & Site",
-        "icon": "HardHat",
-        "description": "On-site trades, safety coordinators, crane operators, and weather-dependent work windows.",
-        "default_departments": ["Structural Framing", "Electrical Trades", "Plumbing & HVAC", "Site Safety"],
-        "default_roles": ["Site Superintendent", "Master Electrician", "Heavy Equipment Operator", "Safety Officer"],
-        "profession_label": "Tradesperson / Engineer",
-        "resource_types": ["Tower Crane 1", "Excavator Unit 3", "Site Office Trailer", "Zone A"]
-    },
-    {
-        "type": "it_team",
-        "name": "IT / Project Team",
-        "icon": "Code",
-        "description": "Scrum squads, sprint timelines, cross-functional engineering teams, and standby on-call rota.",
-        "default_departments": ["Frontend Squad", "Backend Squad", "DevOps & Cloud", "QA Automation"],
-        "default_roles": ["Staff Engineer", "Senior Full-Stack Dev", "Cloud Architect", "SDET Engineer"],
-        "profession_label": "Software Engineer / Tech Lead",
-        "resource_types": ["Scrum Room Apex", "Virtual War Room", "Testing Lab"]
-    },
-    {
-        "type": "custom",
-        "name": "Custom Organization",
-        "icon": "Sparkles",
-        "description": "Fully custom organizational model with flexible profession rules and staffing constraints.",
-        "default_departments": ["Operations", "Administration", "Field Services"],
-        "default_roles": ["Team Lead", "Specialist", "Coordinator"],
-        "profession_label": "Team Member",
-        "resource_types": ["Main Office", "Meeting Room", "Resource Hub"]
     }
 ]
 

@@ -1,12 +1,20 @@
 import datetime
 from typing import List, Dict, Any, Tuple
 from ortools.sat.python import cp_model
+from app.core.time_utils import (
+    parse_time_to_minutes,
+    calculate_shift_duration_minutes,
+    calculate_shift_duration_hours,
+    get_slot_datetime_interval,
+    is_overlapping_interval,
+    is_overnight_shift,
+)
 
 class SchedulingEngine:
     """
     Real Constraint Programming Scheduling Engine using Google OR-Tools CP-SAT.
     Enforces mandatory constraints:
-      - No overlapping assignments for the same person
+      - No overlapping assignments for the same person (including overnight shifts)
       - No assignment during confirmed unavailability or approved leave
       - Required skills and qualifications
       - Working-hour limits
@@ -23,11 +31,7 @@ class SchedulingEngine:
 
     @staticmethod
     def _parse_time_to_minutes(time_str: str) -> int:
-        try:
-            parts = time_str.split(":")
-            return int(parts[0]) * 60 + int(parts[1])
-        except Exception:
-            return 0
+        return parse_time_to_minutes(time_str)
 
     @staticmethod
     def _is_qualified(person: Dict[str, Any], slot: Dict[str, Any]) -> Tuple[bool, str]:
@@ -54,21 +58,29 @@ class SchedulingEngine:
 
     @staticmethod
     def _is_on_leave(person_id: int, slot: Dict[str, Any], leave_records: List[Dict[str, Any]]) -> bool:
-        slot_date = slot.get("date_str")
-        slot_start = slot.get("start_time")
-        slot_end = slot.get("end_time")
+        slot_start_dt, slot_end_dt, _ = get_slot_datetime_interval(
+            slot.get("date_str"),
+            slot.get("start_time", "00:00"),
+            slot.get("end_time", "00:00"),
+            slot.get("day_of_week")
+        )
 
         for l in leave_records:
             if l.get("person_id") == person_id:
-                # Check date overlap
                 start_d = l.get("start_date")
-                end_d = l.get("end_date")
-                if slot_date and (start_d <= slot_date <= end_d):
-                    # Check time overlap
-                    l_start = l.get("start_time", "00:00")
-                    l_end = l.get("end_time", "23:59")
-                    if not (slot_end <= l_start or slot_start >= l_end):
-                        return True
+                end_d = l.get("end_date") or start_d
+                if not start_d:
+                    continue
+                l_start_t = l.get("start_time") or "00:00"
+                l_end_t = l.get("end_time") or "23:59"
+                try:
+                    l_start_dt = datetime.datetime.strptime(f"{start_d} {l_start_t}", "%Y-%m-%d %H:%M")
+                    l_end_dt = datetime.datetime.strptime(f"{end_d} {l_end_t}", "%Y-%m-%d %H:%M")
+                except Exception:
+                    continue
+
+                if is_overlapping_interval(slot_start_dt, slot_end_dt, l_start_dt, l_end_dt):
+                    return True
         return False
 
     @staticmethod
@@ -202,28 +214,30 @@ class SchedulingEngine:
             assigned_vars = [x[(s_idx, p_idx)] for p_idx in eligible_candidates[s_idx]]
             model.Add(sum(assigned_vars) + unfilled[s_idx] == 1)
 
-        # Hard Constraint: No person can have overlapping slots on the same date
+        # Precompute slot datetime intervals and durations (handling daytime and overnight shifts)
+        slot_intervals = [
+            get_slot_datetime_interval(
+                s.get("date_str"),
+                s.get("start_time", "00:00"),
+                s.get("end_time", "00:00"),
+                s.get("day_of_week")
+            )
+            for s in slots
+        ]
+
+        # Hard Constraint: No person can have overlapping slots (supports overnight & cross-day)
         for p_idx in range(num_people):
-            # Group candidate slots for this person by date
-            date_slots: Dict[str, List[int]] = {}
-            for s_idx in range(num_slots):
-                if p_idx in eligible_candidates[s_idx]:
-                    d = slots[s_idx].get("date_str") or str(slots[s_idx].get("day_of_week"))
-                    date_slots.setdefault(d, []).append(s_idx)
+            cand_slots = [s_idx for s_idx in range(num_slots) if p_idx in eligible_candidates[s_idx]]
+            num_cand = len(cand_slots)
+            for i in range(num_cand):
+                s1_idx = cand_slots[i]
+                s1_start, s1_end, _ = slot_intervals[s1_idx]
+                for j in range(i + 1, num_cand):
+                    s2_idx = cand_slots[j]
+                    s2_start, s2_end, _ = slot_intervals[s2_idx]
 
-            for d, s_indices in date_slots.items():
-                for i in range(len(s_indices)):
-                    for j in range(i + 1, len(s_indices)):
-                        s1 = slots[s_indices[i]]
-                        s2 = slots[s_indices[j]]
-                        s1_start = self._parse_time_to_minutes(s1.get("start_time", "00:00"))
-                        s1_end = self._parse_time_to_minutes(s1.get("end_time", "00:00"))
-                        s2_start = self._parse_time_to_minutes(s2.get("start_time", "00:00"))
-                        s2_end = self._parse_time_to_minutes(s2.get("end_time", "00:00"))
-
-                        # If overlapping in time
-                        if not (s1_end <= s2_start or s2_end <= s1_start):
-                            model.Add(x[(s_indices[i], p_idx)] + x[(s_indices[j], p_idx)] <= 1)
+                    if is_overlapping_interval(s1_start, s1_end, s2_start, s2_end):
+                        model.Add(x[(s1_idx, p_idx)] + x[(s2_idx, p_idx)] <= 1)
 
         # Hard Constraint: Max working hours per week per person
         person_workload_vars = []
@@ -232,23 +246,14 @@ class SchedulingEngine:
             p_assignments = []
             for s_idx in range(num_slots):
                 if p_idx in eligible_candidates[s_idx]:
-                    slot = slots[s_idx]
-                    dur_hours = max(
-                        1,
-                        int(
-                            (
-                                self._parse_time_to_minutes(slot.get("end_time", "00:00"))
-                                - self._parse_time_to_minutes(slot.get("start_time", "00:00"))
-                            )
-                            / 60
-                        ),
-                    )
+                    _, _, dur_m = slot_intervals[s_idx]
+                    dur_hours = max(1, round(dur_m / 60.0))
                     p_assignments.append(x[(s_idx, p_idx)] * dur_hours)
 
             if p_assignments:
                 total_hours_var = model.NewIntVar(0, 100, f"hours_p{p_idx}")
                 model.Add(total_hours_var == sum(p_assignments))
-                # Soft/hard limit: allow up to max_hours + 10 overtime if penalty applied
+                # Soft/hard limit: allow up to max_hours + 12 overtime if penalty applied
                 model.Add(total_hours_var <= int(max_hours + 12))
                 person_workload_vars.append(total_hours_var)
 

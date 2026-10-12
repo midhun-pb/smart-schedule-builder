@@ -262,8 +262,8 @@ export const OrgSelectionModule: React.FC = () => {
           errors.push(`${DAY_NAMES[i]} is marked as a working day but has no scheduled periods.`);
         } else {
           for (const p of day.periods) {
-            if (p.start_time >= p.end_time) {
-              errors.push(`Invalid hours for "${p.name}" on ${DAY_NAMES[i]}: Start time (${p.start_time}) must be earlier than End time (${p.end_time}).`);
+            if (!p.start_time || !p.end_time || p.start_time === p.end_time) {
+              errors.push(`Invalid hours for "${p.name}" on ${DAY_NAMES[i]}: Start time and end time cannot be identical.`);
             }
           }
         }
@@ -871,19 +871,21 @@ export const OrgSelectionModule: React.FC = () => {
           <div className="text-center max-w-2xl mx-auto space-y-3">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full glass-pill border border-blue-500/20 text-blue-600 dark:text-blue-400 text-xs font-semibold">
               <Sparkles className="w-3.5 h-3.5" />
-              15 Multi-Profession Scheduling Organizations
+              Specialized Organization Rostering
             </div>
             <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900 dark:text-white">
               Select Your Organization Type
             </h1>
             <p className="text-sm md:text-base text-slate-600 dark:text-slate-400">
-              Each organization features tailored setup fields, specific operational roles, customized physical resources,
-              and independent weekly timetable rules. Selecting an organization opens its setup form.
+              Select University / College, Company / Office, or Aviation / Airline to configure tailored schedules,
+              operational roles, physical facilities, and individual staff timetables.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {presets.map((preset) => {
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 max-w-6xl mx-auto">
+            {presets
+              .filter((preset) => ['college', 'company', 'airline'].includes(preset.type))
+              .map((preset) => {
               const IconComponent = ICON_MAP[preset.icon] || Building2;
               const isCurrentlyActive = activeOrg?.type === preset.type;
 

@@ -13,6 +13,14 @@ from app.schemas.schemas import (
     AssignmentUpdate, DragDropAssignRequest, CopyWeekRequest
 )
 from app.services.scheduling_engine import SchedulingEngine
+from app.core.time_utils import (
+    calculate_shift_duration_minutes,
+    calculate_shift_duration_hours,
+    is_overnight_shift,
+    get_slot_datetime_interval,
+    is_overlapping_interval,
+    is_valid_shift_time,
+)
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -106,8 +114,10 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
             "staffing_status": staffing_status,
             "assigned_count": active_count,
             "assigned_staff": assigned_staff_list,
+            "duration_minutes": calculate_shift_duration_minutes(s.start_time, s.end_time),
+            "duration_hours": calculate_shift_duration_hours(s.start_time, s.end_time),
             # Overnight detection: start > end or explicit night designation
-            "is_overnight": bool((s.start_time > s.end_time) or ("night" in s.title.lower()) or ("overnight" in s.title.lower())),
+            "is_overnight": bool(is_overnight_shift(s.start_time, s.end_time) or ("night" in s.title.lower()) or ("overnight" in s.title.lower())),
             "assignment_id": primary_assign.id if primary_assign else None,
             "person_id": assigned_p.id if assigned_p else None,
             "person_name": assigned_p.name if assigned_p else "Unfilled",
@@ -163,6 +173,10 @@ def create_slot(slot_data: SlotCreate, db: Session = Depends(get_db)):
     """
     Creates a new custom time slot / period in the timetable.
     """
+    valid_time, time_msg = is_valid_shift_time(slot_data.start_time, slot_data.end_time)
+    if not valid_time:
+        raise HTTPException(status_code=400, detail=time_msg)
+
     if not slot_data.schedule_id:
         # Pick the active schedule for the org
         sched = db.query(Schedule).filter(Schedule.org_id == slot_data.org_id).order_by(Schedule.created_at.desc()).first()
@@ -225,6 +239,13 @@ def update_slot(slot_id: int, payload: SlotUpdate, db: Session = Depends(get_db)
     slot = db.query(RequirementSlot).filter(RequirementSlot.id == slot_id).first()
     if not slot:
         raise HTTPException(status_code=404, detail="Slot not found")
+
+    new_start = payload.start_time or slot.start_time
+    new_end = payload.end_time or slot.end_time
+    if payload.start_time or payload.end_time:
+        valid_time, time_msg = is_valid_shift_time(new_start, new_end)
+        if not valid_time:
+            raise HTTPException(status_code=400, detail=time_msg)
 
     update_data = payload.dict(exclude_unset=True)
     for field, value in update_data.items():
@@ -416,25 +437,27 @@ def pre_publish_check(schedule_id: int, db: Session = Depends(get_db)):
                 "required_min": s.min_staff or 1
             })
 
-    # Check hard conflicts (double-bookings)
-    person_day_slots: Dict[tuple, List[Assignment]] = {}
+    # Check hard conflicts (double-bookings) using concrete datetime intervals across dates & overnight shifts
+    person_slots: Dict[int, List[Assignment]] = {}
     for a in assignments:
-        if a.person_id and a.date_str:
-            person_day_slots.setdefault((a.person_id, a.date_str), []).append(a)
+        if a.person_id and a.start_time and a.end_time:
+            person_slots.setdefault(a.person_id, []).append(a)
 
     conflicts = []
-    for (p_id, d_str), a_list in person_day_slots.items():
+    for p_id, a_list in person_slots.items():
         if len(a_list) > 1:
             for i in range(len(a_list)):
+                a1 = a_list[i]
+                s1_start, s1_end, _ = get_slot_datetime_interval(a1.date_str, a1.start_time, a1.end_time)
                 for j in range(i + 1, len(a_list)):
-                    a1 = a_list[i]
                     a2 = a_list[j]
-                    if not (a1.end_time <= a2.start_time or a1.start_time >= a2.end_time):
+                    s2_start, s2_end, _ = get_slot_datetime_interval(a2.date_str, a2.start_time, a2.end_time)
+                    if is_overlapping_interval(s1_start, s1_end, s2_start, s2_end):
                         p_name = people[p_id].name if p_id in people else "Staff"
                         conflicts.append({
                             "person_name": p_name,
-                            "date": d_str,
-                            "time_conflict": f"{a1.start_time}-{a1.end_time} vs {a2.start_time}-{a2.end_time}"
+                            "date": f"{a1.date_str} / {a2.date_str}",
+                            "time_conflict": f"{a1.date_str} {a1.start_time}-{a1.end_time} vs {a2.date_str} {a2.start_time}-{a2.end_time}"
                         })
 
     # Holiday conflicts check
@@ -855,3 +878,173 @@ def publish_schedule(schedule_id: int, db: Session = Depends(get_db)):
     db.add(notif)
     db.commit()
     return {"success": True, "status": "published"}
+
+from pydantic import BaseModel
+
+class AddLabRequest(BaseModel):
+    teacher_id: int
+    subject: str
+    date_str: str
+    start_time: str
+    end_time: str
+    resource_id: Optional[int] = None
+    department_id: Optional[int] = None
+    semester: Optional[str] = "S5"
+    class_name: Optional[str] = "CSE-A"
+
+@router.post("/{schedule_id}/add-lab")
+def add_lab_session(schedule_id: int, req: AddLabRequest, db: Session = Depends(get_db)):
+    """
+    Schedules a specialized laboratory session for University/College faculty.
+    Validates times, teacher qualifications, leave, teacher conflicts, and laboratory double-bookings.
+    """
+    sched = db.query(Schedule).filter(Schedule.id == schedule_id).first()
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+
+    org = sched.organization
+    if org and org.type not in ["college", "university"]:
+        raise HTTPException(status_code=400, detail="Laboratory scheduling is only available for University/College organizations.")
+
+    valid_time, time_msg = is_valid_shift_time(req.start_time, req.end_time)
+    if not valid_time:
+        raise HTTPException(status_code=400, detail=time_msg)
+
+    teacher = db.query(Person).filter(Person.id == req.teacher_id, Person.org_id == sched.org_id).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Faculty member not found")
+
+    lab_start_dt, lab_end_dt, dur_m = get_slot_datetime_interval(req.date_str, req.start_time, req.end_time)
+
+    # 1. Check teacher leave
+    leaves = db.query(LeaveRequest).filter(
+        LeaveRequest.person_id == teacher.id,
+        LeaveRequest.status.in_(["approved", "emergency_recorded"])
+    ).all()
+    for l in leaves:
+        try:
+            l_start = datetime.datetime.strptime(f"{l.start_date} {l.start_time or '00:00'}", "%Y-%m-%d %H:%M")
+            l_end = datetime.datetime.strptime(f"{l.end_date or l.start_date} {l.end_time or '23:59'}", "%Y-%m-%d %H:%M")
+            if is_overlapping_interval(lab_start_dt, lab_end_dt, l_start, l_end):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{teacher.name} is on approved {l.leave_type} leave during this lab time."
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    # 2. Check teacher schedule conflicts
+    teacher_assignments = db.query(Assignment).filter(
+        Assignment.schedule_id == schedule_id,
+        Assignment.person_id == teacher.id,
+        Assignment.status == "assigned"
+    ).all()
+    for ta in teacher_assignments:
+        ta_start, ta_end, _ = get_slot_datetime_interval(ta.date_str, ta.start_time, ta.end_time)
+        if is_overlapping_interval(lab_start_dt, lab_end_dt, ta_start, ta_end):
+            ta_title = ta.slot.title if ta.slot else "Assignment"
+            raise HTTPException(
+                status_code=400,
+                detail=f"{teacher.name} already has a conflicting class '{ta_title}' at {ta.start_time}-{ta.end_time} on {ta.date_str}."
+            )
+
+    # 3. Check laboratory resource conflict (if resource specified)
+    if req.resource_id:
+        res = db.query(Resource).filter(Resource.id == req.resource_id, Resource.org_id == sched.org_id).first()
+        if not res:
+            raise HTTPException(status_code=404, detail="Laboratory resource not found")
+
+        res_slots = db.query(RequirementSlot).filter(
+            RequirementSlot.schedule_id == schedule_id,
+            RequirementSlot.resource_id == req.resource_id
+        ).all()
+        for rs in res_slots:
+            rs_start, rs_end, _ = get_slot_datetime_interval(rs.date_str, rs.start_time, rs.end_time, rs.day_of_week)
+            if is_overlapping_interval(lab_start_dt, lab_end_dt, rs_start, rs_end):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Laboratory '{res.name}' is already booked for '{rs.title}' ({rs.start_time}-{rs.end_time}) on {rs.date_str}."
+                )
+
+    # 4. Create slot & assignment
+    try:
+        dt_obj = datetime.datetime.strptime(req.date_str.strip(), "%Y-%m-%d")
+        dow = dt_obj.weekday()
+    except Exception:
+        dow = 0
+
+    dept_id = req.department_id or teacher.department_id
+    sub_title = req.subject.strip()
+    slot_title = f"{sub_title} Lab ({req.class_name})" if req.class_name else f"{sub_title} Lab"
+
+    new_slot = RequirementSlot(
+        org_id=sched.org_id,
+        schedule_id=sched.id,
+        title=slot_title,
+        date_str=req.date_str,
+        day_of_week=dow,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        department_id=dept_id,
+        resource_id=req.resource_id,
+        required_skills=[sub_title],
+        required_qualifications=["B.Tech", "M.Tech"],
+        profession_metadata={
+            "subject": sub_title,
+            "semester": req.semester or "S5",
+            "class": req.class_name or "CSE-A",
+            "lab": True
+        },
+        min_staff=1,
+        target_staff=1,
+        max_staff=2,
+        period_type="work",
+        is_locked=True
+    )
+    db.add(new_slot)
+    db.flush()
+
+    new_assign = Assignment(
+        schedule_id=sched.id,
+        slot_id=new_slot.id,
+        person_id=teacher.id,
+        original_person_id=teacher.id,
+        date_str=req.date_str,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        status="assigned"
+    )
+    db.add(new_assign)
+
+    audit = AuditLog(
+        org_id=sched.org_id,
+        action="LAB_SESSION_SCHEDULED",
+        entity_type="slot",
+        entity_id=str(new_slot.id),
+        details={
+            "teacher": teacher.name,
+            "subject": sub_title,
+            "date": req.date_str,
+            "time": f"{req.start_time}-{req.end_time}"
+        }
+    )
+    db.add(audit)
+
+    notif = Notification(
+        org_id=sched.org_id,
+        title="Lab Session Scheduled",
+        message=f"{sub_title} Lab scheduled with {teacher.name} on {req.date_str} ({req.start_time}-{req.end_time}).",
+        category="schedule",
+        link_url="/schedule"
+    )
+    db.add(notif)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"Successfully scheduled {slot_title} for {teacher.name}.",
+        "slot_id": new_slot.id,
+        "assignment_id": new_assign.id
+    }
