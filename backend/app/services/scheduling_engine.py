@@ -186,6 +186,7 @@ class SchedulingEngine:
         for s_idx, slot in enumerate(slots):
             eligible_candidates[s_idx] = []
             slot_sub_id = slot.get("subject_id") or (slot.get("profession_metadata") or {}).get("subject_id")
+            slot_target_pid = (slot.get("profession_metadata") or {}).get("target_person_id")
 
             for p_idx, person in enumerate(people):
                 p_id = person.get("id")
@@ -198,6 +199,11 @@ class SchedulingEngine:
                 # 1. Leave / Unavailability hard check
                 if self._is_on_leave(p_id, slot, leave_records):
                     disqualification_reasons[(s_idx, p_idx)] = "On leave or unavailable"
+                    continue
+
+                # If this slot was explicitly provisioned for this person, they are qualified
+                if slot_target_pid and slot_target_pid == p_id:
+                    eligible_candidates[s_idx].append(p_idx)
                     continue
 
                 # 2. Dedicated Teacher-Subject Assignment check
@@ -236,8 +242,11 @@ class SchedulingEngine:
                 if not (slot_sub_id and slot_sub_id in teacher_subject_map):
                     qualified, reason = self._is_qualified(person, slot)
                     if not qualified:
-                        disqualification_reasons[(s_idx, p_idx)] = reason
-                        continue
+                        p_dept = person.get("department_id")
+                        s_dept = slot.get("department_id")
+                        if not (p_dept and s_dept and p_dept == s_dept):
+                            disqualification_reasons[(s_idx, p_idx)] = reason
+                            continue
 
                 # 4. Profession specific metadata check (e.g. lab capability, semesters)
                 prof_meta = person.get("profession_metadata", {})
@@ -378,19 +387,56 @@ class SchedulingEngine:
                 model.Add(sum(assigned_count) <= max_load)
 
         objective_terms = []
-        # Unfilled slots penalty
+        # 1. Unfilled slots penalty
         for s_idx in range(num_slots):
             objective_terms.append(unfilled[s_idx] * 50000)
 
-        # Fairness penalty: minimize maximum load
+        # 2. Mandatory All-Staff Assignment & Proportional Workload Distribution:
+        # Every active employee with candidate slots MUST be assigned based on their hours/shifts
+        for p_idx, person in enumerate(people):
+            p_id = person.get("id")
+            cand_slots = [s_idx for s_idx in range(num_slots) if p_idx in eligible_candidates[s_idx]]
+            if cand_slots:
+                assigned_vars = [x[(s_idx, p_idx)] for s_idx in cand_slots]
+
+                # Determine target workload (periods or shifts)
+                person_tas = [ta for ta in teacher_assignments if ta.get("person_id") == p_id]
+                if person_tas:
+                    target_p = sum(ta.get("required_periods", 4) or 4 for ta in person_tas)
+                else:
+                    max_hrs = person.get("max_hours_per_week", 40.0) or 40.0
+                    target_p = max(1, min(len(cand_slots), int(max_hrs / 4.0)))
+
+                target_p = min(target_p, len(cand_slots))
+
+                # Boolean indicating if person receives >= 1 assignment
+                is_assigned_p = model.NewBoolVar(f"is_assigned_p{p_idx}")
+                model.Add(sum(assigned_vars) >= 1).OnlyEnforceIf(is_assigned_p)
+                model.Add(sum(assigned_vars) == 0).OnlyEnforceIf(is_assigned_p.Not())
+
+                # Massive penalty (100,000) for leaving any active employee unassigned!
+                objective_terms.append(is_assigned_p.Not() * 100000)
+
+                # Penalize deviation from target workload to ensure hours/periods balance
+                dev_under = model.NewIntVar(0, num_slots, f"dev_under_p{p_idx}")
+                dev_over = model.NewIntVar(0, num_slots, f"dev_over_p{p_idx}")
+                model.Add(sum(assigned_vars) + dev_under >= target_p)
+                model.Add(sum(assigned_vars) - dev_over <= target_p)
+                objective_terms.append(dev_under * 1500 + dev_over * 500)
+
+        # 3. Fairness penalty: minimize maximum load
         objective_terms.append(max_load * int(100 * fairness_weight))
 
-        # Preference reward (as negative penalty)
+        # 4. Preference reward (as negative penalty)
         for s_idx in range(num_slots):
             slot = slots[s_idx]
             slot_time = slot.get("start_time", "")
+            slot_target_pid = (slot.get("profession_metadata") or {}).get("target_person_id")
             for p_idx in eligible_candidates[s_idx]:
                 person = people[p_idx]
+                if slot_target_pid and slot_target_pid == person.get("id"):
+                    objective_terms.append(x[(s_idx, p_idx)] * -2000)
+
                 prefs = person.get("preferences", {}) or {}
                 pref_shifts = prefs.get("preferred_shifts", [])
                 score = 0
@@ -441,6 +487,47 @@ class SchedulingEngine:
                             "is_replacement": False,
                             "replacement_type": "none",
                         })
+
+            # Post-solve fairness verification: If any person is still unassigned but has available slots,
+            # assign them to unfilled non-conflicting slots.
+            unassigned_people = [p for p in people if person_counts.get(p["id"], 0) == 0]
+            if unassigned_people and unfilled_list:
+                for p in unassigned_people:
+                    p_id = p["id"]
+                    for s_id in list(unfilled_list):
+                        slot_dict = next((s for s in slots if s.get("id") == s_id), None)
+                        if not slot_dict:
+                            continue
+                        if self._is_on_leave(p_id, slot_dict, leave_records):
+                            continue
+                        p_assigns = [a for a in final_assignments if a["person_id"] == p_id]
+                        overlap = False
+                        s_start = slot_dict.get("start_time", "00:00")
+                        s_end = slot_dict.get("end_time", "00:00")
+                        s_date = slot_dict.get("date_str")
+                        for pa in p_assigns:
+                            if pa.get("date_str") == s_date:
+                                pa_start = pa.get("start_time", "00:00")
+                                pa_end = pa.get("end_time", "00:00")
+                                if not (s_end <= pa_start or s_start >= pa_end):
+                                    overlap = True
+                                    break
+                        if not overlap:
+                            final_assignments.append({
+                                "slot_id": slot_dict.get("id"),
+                                "person_id": p_id,
+                                "person_name": p.get("name"),
+                                "slot_title": slot_dict.get("title"),
+                                "date_str": slot_dict.get("date_str"),
+                                "day_of_week": slot_dict.get("day_of_week"),
+                                "start_time": slot_dict.get("start_time"),
+                                "end_time": slot_dict.get("end_time"),
+                                "is_replacement": False,
+                                "replacement_type": "none",
+                            })
+                            person_counts[p_id] = person_counts.get(p_id, 0) + 1
+                            unfilled_list.remove(s_id)
+                            break
 
             # Calculate Fairness score (equitable workload distribution)
             counts = list(person_counts.values())
@@ -494,7 +581,10 @@ class SchedulingEngine:
                     continue
                 qualified, _ = self._is_qualified(person, slot)
                 if not qualified:
-                    continue
+                    p_dept = person.get("department_id")
+                    s_dept = slot.get("department_id")
+                    if not (p_dept and s_dept and p_dept == s_dept):
+                        continue
                 # check time overlap with existing assignments
                 has_overlap = False
                 for a in assignments:

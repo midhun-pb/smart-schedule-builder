@@ -684,6 +684,226 @@ def copy_week_schedule(schedule_id: int, req: CopyWeekRequest, db: Session = Dep
 
 # --- Schedule Generation with Google OR-Tools CP-SAT & Selective Regeneration ---
 
+def ensure_comprehensive_slots_for_schedule(
+    org: Organization,
+    sched: Schedule,
+    period_start: str,
+    period_end: str,
+    db: Session,
+    force_regenerate: bool = False
+) -> List[RequirementSlot]:
+    """
+    Provisions and synchronizes requirement slots so that ALL active employees
+    and teachers have slots corresponding to their subjects, cohorts, and weekly hours.
+    Ensures that when new employees are added, slots are generated to schedule them.
+    """
+    from app.api.organizations import get_default_working_days_schedule
+
+    all_slots = db.query(RequirementSlot).filter(RequirementSlot.schedule_id == sched.id).all()
+    people = db.query(Person).filter(Person.org_id == org.id, Person.status == "active").all()
+    if not people:
+        return all_slots
+
+    teacher_assignments = db.query(TeacherSubjectAssignment).filter(
+        TeacherSubjectAssignment.org_id == org.id,
+        TeacherSubjectAssignment.assignment_status == "active"
+    ).all()
+
+    # Determine if slots need regeneration/synchronization:
+    existing_sub_ids = {s.subject_id for s in all_slots if s.subject_id}
+    ta_sub_ids = {ta.subject_id for ta in teacher_assignments if ta.subject_id}
+    missing_sub_slots = bool(ta_sub_ids and not ta_sub_ids.issubset(existing_sub_ids))
+
+    covered_teachers = set()
+    for ta in teacher_assignments:
+        if ta.subject_id in existing_sub_ids:
+            covered_teachers.add(ta.person_id)
+    missing_teachers = len(covered_teachers) < len({ta.person_id for ta in teacher_assignments})
+
+    work_slots = [s for s in all_slots if getattr(s, "period_type", "work") == "work"]
+    needs_more_slots = len(work_slots) < len(people)
+
+    needs_regen = force_regenerate or (not all_slots) or missing_sub_slots or missing_teachers or needs_more_slots
+
+    if not needs_regen:
+        return all_slots
+
+    # Preserve locked slots, remove unlocked slots to rebuild complete schedule
+    if all_slots:
+        for s in all_slots:
+            if not s.is_locked:
+                db.delete(s)
+        db.commit()
+
+    working_sched = (org.settings_json.get("working_days_schedule") if org.settings_json else None) or get_default_working_days_schedule(org.type)
+    resources = db.query(Resource).filter(Resource.org_id == org.id).all()
+    departments = db.query(Department).filter(Department.org_id == org.id).all()
+    dept_id = departments[0].id if departments else None
+    res_id = resources[0].id if resources else None
+    subjects = db.query(Subject).filter(Subject.org_id == org.id).all()
+    subj_map = {s.id: s for s in subjects}
+
+    # Build workload items for EVERY active employee & teacher
+    workload_items = []
+    
+    # 1. Staff with dedicated TeacherSubjectAssignment records
+    for ta in teacher_assignments:
+        sub = subj_map.get(ta.subject_id)
+        req_periods = getattr(ta, "required_periods", 4) or 4
+        dept = next((d for d in departments if d.id == (ta.department_id or (sub.department_id if sub else None))), None)
+        dept_prefix = f"{dept.code} - " if dept and dept.code else ""
+        c_name = ta.class_name or f"{dept_prefix}{ta.semester or 'General'}"
+        workload_items.append({
+            "person_id": ta.person_id,
+            "subject_id": ta.subject_id,
+            "subject_name": sub.name if sub else (ta.semester or "Lecture"),
+            "subject_code": sub.code if sub else "",
+            "semester": ta.semester or (sub.semester if sub else "S1"),
+            "class_name": c_name,
+            "department_id": ta.department_id or (sub.department_id if sub else dept_id),
+            "required_periods": req_periods,
+            "allowed_working_days": getattr(ta, "allowed_working_days", [0, 1, 2, 3, 4]) or [0, 1, 2, 3, 4],
+            "period_duration": getattr(ta, "period_duration", "1 hour") or "1 hour",
+            "is_lab": sub.is_lab if sub else False,
+            "allocated": 0
+        })
+
+    # 2. Staff without dedicated TeacherSubjectAssignment records (ensure they also get scheduled!)
+    assigned_person_ids = {w["person_id"] for w in workload_items}
+    for p in people:
+        if p.id not in assigned_person_ids:
+            dept = next((d for d in departments if d.id == p.department_id), None)
+            dept_prefix = f"{dept.code} - " if dept and dept.code else ""
+
+            claimed_sub_ids = {w["subject_id"] for w in workload_items if w.get("subject_id")}
+            dept_subs = [s for s in subjects if s.department_id == p.department_id and s.id not in claimed_sub_ids]
+            sub = dept_subs[0] if dept_subs else None
+
+            sub_name = sub.name if sub else (f"{p.name} Lecture" if org.type == "college" else f"{p.name} Shift")
+            sub_code = sub.code if sub else "DUTY"
+            sub_sem = sub.semester if sub else ((p.profession_metadata or {}).get("semester", "General") if isinstance(p.profession_metadata, dict) else "General")
+
+            max_hrs = p.max_hours_per_week or 40.0
+            req_periods = max(2, min(5, round(max_hrs / 8.0)))
+
+            c_name = f"{dept_prefix}{sub_sem}" if sub else f"{dept_prefix}{p.name} Cohort"
+
+            workload_items.append({
+                "person_id": p.id,
+                "subject_id": sub.id if sub else None,
+                "subject_name": sub_name,
+                "subject_code": sub_code,
+                "semester": sub_sem,
+                "class_name": c_name,
+                "department_id": p.department_id or dept_id,
+                "required_periods": req_periods,
+                "allowed_working_days": [0, 1, 2, 3, 4],
+                "period_duration": "1 hour",
+                "is_lab": False,
+                "allocated": 0
+            })
+
+    # Group workload items by cohort/class so parallel cohorts run in separate rooms
+    cohort_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for w in workload_items:
+        cohort_groups.setdefault(w["class_name"], []).append(w)
+
+    curr = datetime.datetime.strptime(period_start, "%Y-%m-%d").date()
+    end_d = datetime.datetime.strptime(period_end, "%Y-%m-%d").date()
+    slot_objects = []
+    slot_order_idx = 0
+    room_counter = 0
+
+    while curr <= end_d:
+        day_idx = curr.weekday()
+        day_cfg = working_sched.get(str(day_idx))
+        if day_cfg and day_cfg.get("is_working_day"):
+            periods = day_cfg.get("periods", [])
+            for p in periods:
+                p_type = p.get("type", "lecture")
+                is_break = p_type in ["break", "lunch", "assembly"]
+
+                if is_break:
+                    b_slot = RequirementSlot(
+                        org_id=org.id,
+                        schedule_id=sched.id,
+                        subject_id=None,
+                        title=p.get("name", "Break"),
+                        date_str=curr.strftime("%Y-%m-%d"),
+                        day_of_week=day_idx,
+                        start_time=p.get("start_time", "11:00"),
+                        end_time=p.get("end_time", "11:30"),
+                        resource_id=res_id,
+                        department_id=dept_id,
+                        min_staff=0,
+                        target_staff=0,
+                        max_staff=0,
+                        slot_order=slot_order_idx,
+                        period_type="break",
+                        is_locked=False,
+                        profession_metadata={"class": "All", "class_name": "All"},
+                        required_skills=[]
+                    )
+                    db.add(b_slot)
+                    slot_objects.append(b_slot)
+                    slot_order_idx += 1
+                else:
+                    # Allocate a slot for each cohort needing periods on this day
+                    for c_name, c_items in cohort_groups.items():
+                        eligible = [
+                            w for w in c_items
+                            if day_idx in w["allowed_working_days"] and w["allocated"] < w["required_periods"]
+                        ]
+                        if not eligible and sum(w["allocated"] for w in c_items) < sum(w["required_periods"] for w in c_items):
+                            eligible = [w for w in c_items if day_idx in w["allowed_working_days"]]
+
+                        if eligible:
+                            chosen = min(eligible, key=lambda w: w["allocated"])
+                            chosen["allocated"] += 1
+
+                            room = resources[room_counter % len(resources)] if resources else None
+                            room_counter += 1
+
+                            s_obj = RequirementSlot(
+                                org_id=org.id,
+                                schedule_id=sched.id,
+                                subject_id=chosen["subject_id"],
+                                title=f"{chosen['subject_name']} ({c_name})",
+                                date_str=curr.strftime("%Y-%m-%d"),
+                                day_of_week=day_idx,
+                                start_time=p.get("start_time", "09:00"),
+                                end_time=p.get("end_time", "10:00"),
+                                resource_id=room.id if room else res_id,
+                                department_id=chosen["department_id"],
+                                min_staff=1,
+                                target_staff=1,
+                                max_staff=1,
+                                slot_order=slot_order_idx,
+                                period_type="work",
+                                is_locked=False,
+                                profession_metadata={
+                                    "subject": chosen["subject_name"],
+                                    "subject_code": chosen["subject_code"],
+                                    "semester": chosen["semester"],
+                                    "class": c_name,
+                                    "class_name": c_name,
+                                    "subject_id": chosen["subject_id"],
+                                    "target_person_id": chosen["person_id"],
+                                    "period_duration": chosen["period_duration"],
+                                    "lab": chosen["is_lab"]
+                                },
+                                required_skills=[]
+                            )
+                            db.add(s_obj)
+                            slot_objects.append(s_obj)
+                            slot_order_idx += 1
+
+        curr += datetime.timedelta(days=1)
+
+    db.commit()
+    return db.query(RequirementSlot).filter(RequirementSlot.schedule_id == sched.id).all()
+
+
 @router.post("/generate")
 def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db)):
     """
@@ -691,6 +911,10 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
     Supports selective regeneration (regenerate selected days or only unassigned slots)
     while preserving locked assignments.
     """
+    org = db.query(Organization).filter(Organization.id == req.org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
     sched = db.query(Schedule).filter(
         Schedule.org_id == req.org_id,
         Schedule.title == req.title
@@ -709,95 +933,16 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
         db.commit()
         db.refresh(sched)
 
-    # Fetch slots for this schedule
-    all_slots = db.query(RequirementSlot).filter(RequirementSlot.schedule_id == sched.id).all()
-    
-    # If no slots exist yet, check the organization's custom working_days_schedule to provision slots
-    if not all_slots:
-        org = db.query(Organization).filter(Organization.id == req.org_id).first()
-        from app.api.organizations import get_default_working_days_schedule
-        working_sched = (org.settings_json.get("working_days_schedule") if org and org.settings_json else None) or get_default_working_days_schedule(org.type if org else "college")
-        resources = db.query(Resource).filter(Resource.org_id == req.org_id).all()
-        departments = db.query(Department).filter(Department.org_id == req.org_id).all()
-        res_id = resources[0].id if resources else None
-        dept_id = departments[0].id if departments else None
-
-        curr = datetime.datetime.strptime(req.period_start, "%Y-%m-%d").date()
-        end_d = datetime.datetime.strptime(req.period_end, "%Y-%m-%d").date()
-        
-        # Check if subjects exist to provision academic timetable slots
-        subjects = db.query(Subject).filter(Subject.org_id == req.org_id).order_by(Subject.semester.asc(), Subject.name.asc()).all()
-        sub_idx = 0
-        slot_objects = []
-        slot_order_idx = 0
-        while curr <= end_d:
-            day_idx = curr.weekday()
-            day_cfg = working_sched.get(str(day_idx))
-            if day_cfg and day_cfg.get("is_working_day"):
-                for p in day_cfg.get("periods", []):
-                    p_type = p.get("type", "work")
-                    slot_sub_id = None
-                    slot_title = f"{p.get('name', 'Duty Block')}"
-                    slot_meta = {}
-                    slot_dept_id = dept_id
-                    if p_type == "work" and subjects:
-                        chosen_sub = subjects[sub_idx % len(subjects)]
-                        slot_sub_id = chosen_sub.id
-                        slot_title = f"{chosen_sub.name} ({chosen_sub.code})"
-                        slot_dept_id = chosen_sub.department_id or dept_id
-                        slot_meta = {
-                            "subject": chosen_sub.name,
-                            "semester": chosen_sub.semester,
-                            "class": chosen_sub.class_name,
-                            "subject_id": chosen_sub.id,
-                            "lab": chosen_sub.is_lab
-                        }
-                        sub_idx += 1
-
-                    s_obj = RequirementSlot(
-                        org_id=req.org_id,
-                        schedule_id=sched.id,
-                        subject_id=slot_sub_id,
-                        title=slot_title,
-                        date_str=curr.strftime("%Y-%m-%d"),
-                        day_of_week=day_idx,
-                        start_time=p.get("start_time", "09:00"),
-                        end_time=p.get("end_time", "11:00"),
-                        resource_id=res_id,
-                        department_id=slot_dept_id,
-                        min_staff=p.get("min_staff", 1) if p_type == "work" else 0,
-                        target_staff=p.get("target_staff", 1) if p_type == "work" else 0,
-                        max_staff=p.get("max_staff", 1) if p_type == "work" else 0,
-                        slot_order=slot_order_idx,
-                        period_type=p_type,
-                        is_locked=False,
-                        profession_metadata=slot_meta,
-                        required_skills=[chosen_sub.name] if (p_type == "work" and subjects) else []
-                    )
-                    db.add(s_obj)
-                    slot_objects.append(s_obj)
-                    slot_order_idx += 1
-            curr += datetime.timedelta(days=1)
-        db.commit()
-        all_slots = slot_objects
-
-    # Link existing slots to subjects if matched
-    org_subs = db.query(Subject).filter(Subject.org_id == req.org_id).all()
-    if org_subs:
-        for sl in all_slots:
-            if getattr(sl, "period_type", "work") == "work" and not sl.subject_id:
-                for s in org_subs:
-                    if (s.name.lower() in sl.title.lower()) or (sl.profession_metadata and sl.profession_metadata.get("subject", "").lower() in s.name.lower()):
-                        sl.subject_id = s.id
-                        sl.department_id = s.department_id or sl.department_id
-                        meta = dict(sl.profession_metadata or {})
-                        meta["subject"] = s.name
-                        meta["semester"] = s.semester
-                        meta["class"] = s.class_name
-                        meta["subject_id"] = s.id
-                        sl.profession_metadata = meta
-                        break
-        db.commit()
+    # Ensure requirement slots cover all active employees and their subject assignments
+    force_regen = bool(req.regenerate_days is None and not req.only_unassigned)
+    all_slots = ensure_comprehensive_slots_for_schedule(
+        org=org,
+        sched=sched,
+        period_start=req.period_start,
+        period_end=req.period_end,
+        db=db,
+        force_regenerate=force_regen
+    )
 
     # Filter slots based on selective regeneration parameters
     slots_to_solve = []
@@ -1250,140 +1395,19 @@ def glixon_generate_schedule(req: GlixonGenerateRequest, db: Session = Depends(g
         ta_query = ta_query.filter(TeacherSubjectAssignment.semester.in_(req.selected_semesters))
     teacher_assignments = ta_query.all()
 
-    # Provision requirement slots from working_days_schedule if none exist
-    all_slots = db.query(RequirementSlot).filter(RequirementSlot.schedule_id == sched.id).all()
-    from app.api.organizations import get_default_working_days_schedule
-    working_sched = (org.settings_json.get("working_days_schedule") if org.settings_json else None) or get_default_working_days_schedule(org.type)
-    resources = db.query(Resource).filter(Resource.org_id == req.org_id).all()
     departments = db.query(Department).filter(Department.org_id == req.org_id).all()
-    res_id = resources[0].id if resources else None
-    dept_id = departments[0].id if departments else None
+    resources = db.query(Resource).filter(Resource.org_id == req.org_id).all()
 
-    # Check if slots exist and whether they have subject_ids configured
-    has_subject_slots = any(s.subject_id for s in all_slots)
-    if (not all_slots or not has_subject_slots) and teacher_assignments:
-        if all_slots:
-            for old_s in all_slots:
-                db.delete(old_s)
-            db.commit()
-            all_slots = []
-
-    if not all_slots:
-        curr = datetime.datetime.strptime(req.period_start, "%Y-%m-%d").date()
-        end_d = datetime.datetime.strptime(req.period_end, "%Y-%m-%d").date()
-        slot_objects = []
-        slot_order_idx = 0
-
-        # Build cohorts from teacher assignments or subjects
-        cohort_map: Dict[str, List[Any]] = {}
-        for ta in teacher_assignments:
-            c_name = ta.class_name if ta.class_name else (ta.semester or "General")
-            cohort_map.setdefault(c_name, []).append(ta)
-
-        if not cohort_map:
-            subs = db.query(Subject).filter(Subject.org_id == req.org_id).all()
-            for s in subs:
-                c_name = s.class_name or (s.semester or "General")
-                cohort_map.setdefault(c_name, [])
-            if not cohort_map:
-                cohort_map["General"] = []
-
-        # Track allocated periods per assignment across the week
-        allocated_periods_count: Dict[int, int] = {ta.id: 0 for ta in teacher_assignments}
-
-        while curr <= end_d:
-            day_idx = curr.weekday()
-            day_cfg = working_sched.get(str(day_idx))
-            if day_cfg and day_cfg.get("is_working_day"):
-                for p in day_cfg.get("periods", []):
-                    p_type = p.get("type", "lecture")
-                    is_break = p_type in ["break", "lunch", "assembly"]
-
-                    for c_name, c_tas in cohort_map.items():
-                        if is_break:
-                            s_obj = RequirementSlot(
-                                org_id=req.org_id,
-                                schedule_id=sched.id,
-                                subject_id=None,
-                                title=p.get("name", "Break"),
-                                date_str=curr.strftime("%Y-%m-%d"),
-                                day_of_week=day_idx,
-                                start_time=p.get("start_time", "09:00"),
-                                end_time=p.get("end_time", "10:00"),
-                                resource_id=res_id,
-                                department_id=dept_id,
-                                min_staff=0,
-                                target_staff=0,
-                                max_staff=0,
-                                slot_order=slot_order_idx,
-                                period_type="break",
-                                is_locked=False,
-                                profession_metadata={"class": c_name, "class_name": c_name},
-                                required_skills=[]
-                            )
-                            db.add(s_obj)
-                            slot_objects.append(s_obj)
-                            slot_order_idx += 1
-                        else:
-                            # Pick an eligible teacher assignment for this cohort on this day
-                            eligible_tas = [
-                                ta for ta in c_tas
-                                if day_idx in (getattr(ta, "allowed_working_days", [0, 1, 2, 3, 4]) or [0, 1, 2, 3, 4])
-                            ]
-                            matched_ta = None
-                            if eligible_tas:
-                                under_quota = [ta for ta in eligible_tas if allocated_periods_count.get(ta.id, 0) < (getattr(ta, "required_periods", 4) or 4)]
-                                if under_quota:
-                                    matched_ta = min(under_quota, key=lambda ta: allocated_periods_count.get(ta.id, 0))
-                                else:
-                                    matched_ta = min(eligible_tas, key=lambda ta: allocated_periods_count.get(ta.id, 0))
-                                allocated_periods_count[matched_ta.id] = allocated_periods_count.get(matched_ta.id, 0) + 1
-
-                            chosen_sub_id = matched_ta.subject_id if matched_ta else None
-                            chosen_sub = matched_ta.subject if matched_ta else None
-                            chosen_dept_id = matched_ta.department_id if matched_ta else dept_id
-                            chosen_sem = matched_ta.semester if matched_ta else None
-                            p_dur = getattr(matched_ta, "period_duration", "1 hour") if matched_ta else "1 hour"
-
-                            sub_name = chosen_sub.name if chosen_sub else p.get("name", "Lecture")
-                            slot_title = f"{sub_name} ({c_name})"
-                            slot_meta = {
-                                "subject": chosen_sub.name if chosen_sub else None,
-                                "subject_code": chosen_sub.code if chosen_sub else "",
-                                "semester": chosen_sem,
-                                "class": c_name,
-                                "class_name": c_name,
-                                "subject_id": chosen_sub_id,
-                                "period_duration": p_dur,
-                                "lab": chosen_sub.is_lab if chosen_sub else False
-                            }
-
-                            s_obj = RequirementSlot(
-                                org_id=req.org_id,
-                                schedule_id=sched.id,
-                                subject_id=chosen_sub_id,
-                                title=slot_title,
-                                date_str=curr.strftime("%Y-%m-%d"),
-                                day_of_week=day_idx,
-                                start_time=p.get("start_time", "09:00"),
-                                end_time=p.get("end_time", "10:00"),
-                                resource_id=res_id,
-                                department_id=chosen_dept_id,
-                                min_staff=1,
-                                target_staff=1,
-                                max_staff=1,
-                                slot_order=slot_order_idx,
-                                period_type="work",
-                                is_locked=False,
-                                profession_metadata=slot_meta,
-                                required_skills=[chosen_sub.name] if chosen_sub else []
-                            )
-                            db.add(s_obj)
-                            slot_objects.append(s_obj)
-                            slot_order_idx += 1
-            curr += datetime.timedelta(days=1)
-        db.commit()
-        all_slots = slot_objects
+    # Provision requirement slots from working_days_schedule if none exist
+    # Provision requirement slots covering all active employees and teacher assignments
+    all_slots = ensure_comprehensive_slots_for_schedule(
+        org=org,
+        sched=sched,
+        period_start=req.period_start,
+        period_end=req.period_end,
+        db=db,
+        force_regenerate=True
+    )
 
     # Filter teaching slots
     slots_to_solve = [s for s in all_slots if getattr(s, "period_type", "work") == "work"]

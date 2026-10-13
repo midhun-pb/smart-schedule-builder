@@ -3,7 +3,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from app.main import app, seed_database, seed_subjects_if_needed
 from app.core.database import SessionLocal
-from app.models.models import Organization, Subject, Semester, Person, TeacherSubjectAssignment
+from app.models.models import Organization, Subject, Semester, Person, TeacherSubjectAssignment, Department, Resource, Schedule
 
 client = TestClient(app)
 
@@ -563,6 +563,164 @@ def test_5_step_guided_setup_and_on_the_fly_subject_creation():
     glixon_data = glixon_resp.json()
     assert glixon_data["success"] is True
     assert len(glixon_data["assignments"]) > 0
+
+    db.close()
+
+
+def test_all_employees_assigned_upon_schedule_generation():
+    db = SessionLocal()
+    unique_key = uuid4().hex[:6]
+    # Create distinct organization for this test
+    org = Organization(
+        name=f"All Staff Assignment University {unique_key}",
+        code=f"ASAU_{unique_key}",
+        type="college",
+        settings_json={
+            "working_days": [0, 1, 2, 3, 4],
+            "day_start": "09:00",
+            "day_end": "16:00",
+            "period_duration_minutes": 60,
+            "periods_per_day": 6
+        }
+    )
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+
+    dept1 = Department(org_id=org.id, name=f"CS_{unique_key}", code=f"CS{unique_key}")
+    dept2 = Department(org_id=org.id, name=f"ECE_{unique_key}", code=f"EC{unique_key}")
+    db.add_all([dept1, dept2])
+    db.commit()
+    db.refresh(dept1)
+    db.refresh(dept2)
+
+    room1 = Resource(org_id=org.id, name="LH-101", type="classroom", capacity=60)
+    room2 = Resource(org_id=org.id, name="LH-102", type="classroom", capacity=60)
+    db.add_all([room1, room2])
+    db.commit()
+
+    sub1 = Subject(org_id=org.id, department_id=dept1.id, name=f"Data Structures {unique_key}", code=f"CS301_{unique_key}", semester="S3", required_hours_per_week=4.0)
+    sub2 = Subject(org_id=org.id, department_id=dept2.id, name=f"Digital Circuits {unique_key}", code=f"EC301_{unique_key}", semester="S3", required_hours_per_week=4.0)
+    db.add_all([sub1, sub2])
+    db.commit()
+    db.refresh(sub1)
+    db.refresh(sub2)
+
+    # 1. Add Teacher A (CS)
+    tA_payload = {
+        "org_id": org.id,
+        "name": f"Teacher A {unique_key}",
+        "email": f"teacherA_{unique_key}@test.edu",
+        "employee_code": f"TA-{unique_key}",
+        "department_id": dept1.id,
+        "max_hours_per_week": 30.0,
+        "teacher_assignments": [
+            {
+                "semester": "S3",
+                "subject_id": sub1.id,
+                "required_periods": 3,
+                "period_duration": "1 hour"
+            }
+        ]
+    }
+    respA = client.post("/api/profiles", json=tA_payload)
+    assert respA.status_code == 200, respA.text
+    teacher_a_id = respA.json()["id"]
+
+    # 2. Add Teacher B (ECE)
+    tB_payload = {
+        "org_id": org.id,
+        "name": f"Teacher B {unique_key}",
+        "email": f"teacherB_{unique_key}@test.edu",
+        "employee_code": f"TB-{unique_key}",
+        "department_id": dept2.id,
+        "max_hours_per_week": 30.0,
+        "teacher_assignments": [
+            {
+                "semester": "S3",
+                "subject_id": sub2.id,
+                "required_periods": 3,
+                "period_duration": "1 hour"
+            }
+        ]
+    }
+    respB = client.post("/api/profiles", json=tB_payload)
+    assert respB.status_code == 200, respB.text
+    teacher_b_id = respB.json()["id"]
+
+    # 3. Add Employee C (No explicit subject yet, but active staff)
+    tC_payload = {
+        "org_id": org.id,
+        "name": f"Employee C {unique_key}",
+        "email": f"staffC_{unique_key}@test.edu",
+        "employee_code": f"TC-{unique_key}",
+        "department_id": dept1.id,
+        "max_hours_per_week": 20.0,
+        "teacher_assignments": []
+    }
+    respC = client.post("/api/profiles", json=tC_payload)
+    assert respC.status_code == 200, respC.text
+    teacher_c_id = respC.json()["id"]
+
+    # Generate timetable with GLIXON
+    gen_payload = {
+        "org_id": org.id,
+        "title": f"Initial Schedule {unique_key}",
+        "period_start": "2026-10-19",
+        "period_end": "2026-10-23",
+        "preview": True
+    }
+    gen_resp = client.post("/api/schedules/glixon-generate", json=gen_payload)
+    assert gen_resp.status_code == 200, gen_resp.text
+    gen_data = gen_resp.json()
+    assert gen_data["success"] is True
+
+    # Verify ALL employees currently in the organization receive assignments (NOT just one!)
+    assigned_teacher_ids = {a["teacher_id"] for a in gen_data["assignments"]}
+    assert teacher_a_id in assigned_teacher_ids, "Teacher A must be assigned"
+    assert teacher_b_id in assigned_teacher_ids, "Teacher B must be assigned"
+    assert teacher_c_id in assigned_teacher_ids, "Employee C must be assigned"
+    assert len(assigned_teacher_ids) == 3, f"All 3 staff must be assigned, got {assigned_teacher_ids}"
+
+    # 4. Now ADD another employee (Teacher D)
+    sub3 = Subject(org_id=org.id, department_id=dept1.id, name=f"Algorithms {unique_key}", code=f"CS501_{unique_key}", semester="S5", required_hours_per_week=4.0)
+    db.add(sub3)
+    db.commit()
+    db.refresh(sub3)
+
+    tD_payload = {
+        "org_id": org.id,
+        "name": f"Teacher D {unique_key}",
+        "email": f"teacherD_{unique_key}@test.edu",
+        "employee_code": f"TD-{unique_key}",
+        "department_id": dept1.id,
+        "max_hours_per_week": 25.0,
+        "teacher_assignments": [
+            {
+                "semester": "S5",
+                "subject_id": sub3.id,
+                "required_periods": 3,
+                "period_duration": "1 hour"
+            }
+        ]
+    }
+    respD = client.post("/api/profiles", json=tD_payload)
+    assert respD.status_code == 200, respD.text
+    teacher_d_id = respD.json()["id"]
+
+    # Re-generate timetable
+    gen_resp2 = client.post("/api/schedules/glixon-generate", json=gen_payload)
+    assert gen_resp2.status_code == 200, gen_resp2.text
+    gen_data2 = gen_resp2.json()
+    assert gen_data2["success"] is True
+
+    # Verify EVERY employee including newly added Teacher D receives assignments
+    assigned_teacher_ids2 = {a["teacher_id"] for a in gen_data2["assignments"]}
+    assert teacher_a_id in assigned_teacher_ids2, "Teacher A must still be assigned"
+    assert teacher_b_id in assigned_teacher_ids2, "Teacher B must still be assigned"
+    assert teacher_c_id in assigned_teacher_ids2, "Employee C must still be assigned"
+    assert teacher_d_id in assigned_teacher_ids2, "Newly added Teacher D must be assigned!"
+    assert len(assigned_teacher_ids2) == 4, f"All 4 staff must be assigned, got {len(assigned_teacher_ids2)}"
 
     db.close()
 
