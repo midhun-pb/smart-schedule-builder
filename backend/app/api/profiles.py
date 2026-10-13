@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from app.core.database import get_db
 from app.models.models import Person, Department, AuditLog, Subject, TeacherSubjectAssignment
-from app.schemas.schemas import PersonCreate, PersonBase
+from app.schemas.schemas import PersonCreate, PersonBase, PersonUpdate
 from app.services.skill_engine import SkillEngine
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
@@ -280,33 +280,45 @@ def create_person(data: PersonCreate, db: Session = Depends(get_db)):
     return _format_person(person, dept_name=dept.name if dept else "General", assignments=saved_assignments)
 
 @router.put("/{person_id}")
-def update_person(person_id: int, data: PersonBase, db: Session = Depends(get_db)):
+def update_person(person_id: int, data: PersonUpdate, db: Session = Depends(get_db)):
     person = db.query(Person).filter(Person.id == person_id).first()
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
 
-    person.name = data.name
-    person.email = data.email
-    person.phone = data.phone
-    person.role_title = data.role_title
-    person.employee_code = data.employee_code
-    person.department_id = data.department_id
-    person.qualifications = data.qualifications
-    person.skills = data.skills
-    person.inferred_skills = SkillEngine.infer_hidden_skills(data.skills)
-    person.preferences = data.preferences
-    person.profession_metadata = data.profession_metadata
-    person.max_hours_per_week = data.max_hours_per_week
-    person.status = data.status
-    if data.hire_date:
+    if data.name is not None:
+        person.name = data.name
+    if data.email is not None:
+        person.email = data.email
+    if data.phone is not None:
+        person.phone = data.phone
+    if data.role_title is not None:
+        person.role_title = data.role_title
+    if data.employee_code is not None:
+        person.employee_code = data.employee_code
+    if data.department_id is not None:
+        person.department_id = data.department_id
+    if data.qualifications is not None:
+        person.qualifications = data.qualifications
+    if data.skills is not None:
+        person.skills = data.skills
+        person.inferred_skills = SkillEngine.infer_hidden_skills(data.skills)
+    if data.preferences is not None:
+        person.preferences = data.preferences
+    if data.profession_metadata is not None:
+        person.profession_metadata = data.profession_metadata
+    if data.max_hours_per_week is not None:
+        person.max_hours_per_week = data.max_hours_per_week
+    if data.status is not None:
+        person.status = data.status
+    if data.hire_date is not None:
         person.hire_date = data.hire_date
 
     quality = 100.0
-    if not data.skills:
+    if not (person.skills or []):
         quality -= 25
-    if not data.qualifications:
+    if not (person.qualifications or []):
         quality -= 15
-    if not data.phone:
+    if not person.phone:
         quality -= 10
     person.data_quality_score = max(20.0, quality)
 
@@ -314,7 +326,12 @@ def update_person(person_id: int, data: PersonBase, db: Session = Depends(get_db
     db.refresh(person)
 
     # Sync teacher assignments if provided
-    saved_assignments = _sync_teacher_assignments(person, data.teacher_assignments, db)
+    saved_assignments = None
+    if data.teacher_assignments is not None:
+        saved_assignments = _sync_teacher_assignments(person, data.teacher_assignments, db)
+    else:
+        tas = db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.person_id == person.id).all()
+        saved_assignments = [_format_ta(a) for a in tas]
 
     dept = db.query(Department).filter(Department.id == person.department_id).first() if person.department_id else None
     return _format_person(person, dept_name=dept.name if dept else "General", assignments=saved_assignments)

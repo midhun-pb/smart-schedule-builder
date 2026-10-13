@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../api/client';
-import { PresetOrg, Department, Person, Subject } from '../../types';
+import { PresetOrg, Department, Person, Subject, Semester } from '../../types';
 import { triggerHaptic } from '../../utils/haptics';
 import {
   GraduationCap,
@@ -11,6 +11,8 @@ import {
   Plus,
   ArrowRight,
   ChevronLeft,
+  ChevronDown,
+  ChevronRight,
   X,
   Clock,
   Users,
@@ -39,6 +41,30 @@ const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
 };
 
 const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+interface Step3AssignmentRow {
+  id?: number;
+  department_id?: number;
+  semester: string;
+  subject_id?: number;
+  required_periods: number;
+  period_duration: string;
+  allowed_working_days: number[];
+  preferred_periods: string;
+  class_name?: string;
+}
+
+const DEFAULT_DAYS = [0, 1, 2, 3, 4];
+const DAY_LABELS = [
+  { label: 'Mon', day: 0 },
+  { label: 'Tue', day: 1 },
+  { label: 'Wed', day: 2 },
+  { label: 'Thu', day: 3 },
+  { label: 'Fri', day: 4 },
+  { label: 'Sat', day: 5 },
+  { label: 'Sun', day: 6 },
+];
+const DURATION_OPTIONS = ['1 hour', '45 mins', '50 mins', '1.5 hours', '2 hours'];
 
 export const OrgSelectionModule: React.FC = () => {
   const { activeOrg, switchOrg, refreshOrgList, setActiveTab, addToast } = useApp();
@@ -70,14 +96,21 @@ export const OrgSelectionModule: React.FC = () => {
 
   // STEP 3 State: Employees / Teachers
   const [peopleList, setPeopleList] = useState<Person[]>([]);
+  const [semestersList, setSemestersList] = useState<Semester[]>([]);
   const [personName, setPersonName] = useState<string>('');
   const [personEmail, setPersonEmail] = useState<string>('');
   const [personRole, setPersonRole] = useState<string>('Assistant Professor');
   const [personDeptId, setPersonDeptId] = useState<number | undefined>(undefined);
   const [personQuals, setPersonQuals] = useState<string>('M.Tech');
-  const [personSemesters, setPersonSemesters] = useState<string>('S5');
-  const [personClasses, setPersonClasses] = useState<string>('CSE-A');
+  const [personClasses, setPersonClasses] = useState<string>('');
   const [personWeeklyHours, setPersonWeeklyHours] = useState<number>(36);
+  const [step3Assignments, setStep3Assignments] = useState<Step3AssignmentRow[]>([]);
+  const [editingPersonId, setEditingPersonId] = useState<number | null>(null);
+  const [collapsedAssignments, setCollapsedAssignments] = useState<Record<number, boolean>>({});
+  const [showQuickAddSub, setShowQuickAddSub] = useState<boolean>(false);
+  const [quickSubName, setQuickSubName] = useState<string>('');
+  const [quickSubSemester, setQuickSubSemester] = useState<string>('S1');
+  const [quickSubDeptId, setQuickSubDeptId] = useState<number | undefined>(undefined);
 
   // STEP 4 State: Subjects / Duties
   const [subjectsList, setSubjectsList] = useState<Subject[]>([]);
@@ -138,10 +171,23 @@ export const OrgSelectionModule: React.FC = () => {
     if (!createdOrgId) return;
 
     if (currentStep === 2 || currentStep === 3 || currentStep === 4) {
-      api.getDepartments(createdOrgId).then(setDepartmentsList).catch(console.error);
+      api.getDepartments(createdOrgId).then((depts) => {
+        setDepartmentsList(depts || []);
+        if (depts && depts.length > 0 && !personDeptId) {
+          setPersonDeptId(depts[0].id);
+        }
+      }).catch(console.error);
     }
     if (currentStep === 3) {
       api.getPeople({ org_id: createdOrgId }).then(setPeopleList).catch(console.error);
+      api.getSemesters(createdOrgId).then((sems) => setSemestersList(sems || [])).catch(console.error);
+      api.getSubjects(createdOrgId).then(async (subs) => {
+        if ((!subs || subs.length === 0) && selectedType === 'college') {
+          await ensureCollegeSubjects(createdOrgId);
+        } else {
+          setSubjectsList(subs || []);
+        }
+      }).catch(console.error);
     }
     if (currentStep === 4) {
       api.getSubjects(createdOrgId).then(setSubjectsList).catch(console.error);
@@ -361,42 +407,267 @@ export const OrgSelectionModule: React.FC = () => {
     setCurrentStep(3);
   };
 
-  // STEP 3: Add Employee / Teacher
+  // Helper: Ensure college curriculum has foundational courses
+  const ensureCollegeSubjects = async (orgId: number) => {
+    try {
+      const depts = await api.getDepartments(orgId);
+      const deptId = depts && depts.length > 0 ? depts[0].id : undefined;
+      const defaults = [
+        { name: 'Data Structures & Algorithms', code: 'CS201', sem: 'S3', hrs: 4, lab: false },
+        { name: 'Database Management Systems', code: 'CS301', sem: 'S5', hrs: 4, lab: false },
+        { name: 'Machine Learning', code: 'CS401', sem: 'S7', hrs: 4, lab: false },
+        { name: 'Programming in Python', code: 'CS101', sem: 'S1', hrs: 4, lab: false },
+        { name: 'Computer Networks', code: 'CS302', sem: 'S5', hrs: 4, lab: false },
+        { name: 'Artificial Intelligence', code: 'CS402', sem: 'S7', hrs: 3, lab: false },
+        { name: 'Database Systems Lab', code: 'CS304L', sem: 'S5', hrs: 2, lab: true },
+      ];
+      for (const d of defaults) {
+        await api.createSubject(orgId, {
+          name: d.name,
+          code: d.code,
+          department_id: deptId,
+          semester: d.sem,
+          required_hours_per_week: d.hrs,
+          is_lab: d.lab,
+        });
+      }
+      const updated = await api.getSubjects(orgId);
+      setSubjectsList(updated || []);
+    } catch (e) {
+      console.error('Failed to ensure college subjects', e);
+    }
+  };
+
+  // STEP 3: Assignment Row Handlers
+  const handleAddStep3Assignment = () => {
+    triggerHaptic(10);
+    const defaultSem = semestersList.length > 0 ? semestersList[0].code : 'S1';
+    const defaultDept = personDeptId || (departmentsList.length > 0 ? departmentsList[0].id : undefined);
+    setStep3Assignments((prev) => [
+      ...prev,
+      {
+        semester: defaultSem,
+        department_id: defaultDept,
+        subject_id: undefined,
+        required_periods: 4,
+        period_duration: '1 hour',
+        allowed_working_days: DEFAULT_DAYS,
+        preferred_periods: '',
+        class_name: '',
+      },
+    ]);
+  };
+
+  const handleUpdateStep3Assignment = (index: number, updates: Partial<Step3AssignmentRow>) => {
+    setStep3Assignments((prev) => {
+      const copy = [...prev];
+      copy[index] = { ...copy[index], ...updates };
+      return copy;
+    });
+  };
+
+  const handleRemoveStep3Assignment = (index: number) => {
+    triggerHaptic(12);
+    setStep3Assignments((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  const toggleCollapseAssignment = (index: number) => {
+    setCollapsedAssignments((prev) => ({
+      ...prev,
+      [index]: !prev[index],
+    }));
+  };
+
+  // Quick Add Subject directly from Step 3
+  const handleQuickAddSubject = async () => {
+    if (!createdOrgId || !quickSubName.trim()) return;
+    try {
+      const code = quickSubName.replace(/[^A-Za-z0-9]/g, '').slice(0, 5).toUpperCase();
+      const newSub = await api.createSubject(createdOrgId, {
+        name: quickSubName.trim(),
+        code: code || 'SUB',
+        department_id: quickSubDeptId || personDeptId || (departmentsList[0]?.id ?? undefined),
+        semester: quickSubSemester || 'S1',
+        required_hours_per_week: 4,
+        is_lab: false,
+      });
+      const updated = await api.getSubjects(createdOrgId);
+      setSubjectsList(updated || []);
+      setQuickSubName('');
+      setShowQuickAddSub(false);
+      addToast('Subject Added', `${newSub.name} created for ${newSub.semester}`, 'success');
+    } catch (err: any) {
+      addToast('Error', err.message || 'Failed to add subject', 'error');
+    }
+  };
+
+  // STEP 3: Add / Update Employee or Teacher
   const handleAddPerson = async () => {
     triggerHaptic(10);
-    if (!personName.trim() || !createdOrgId) return;
+    if (!personName.trim() || !createdOrgId) {
+      addToast('Validation Error', 'Please enter Teacher / Employee Name', 'error');
+      return;
+    }
 
     try {
       const skillsArray =
         selectedType === 'college'
-          ? [{ name: subName || 'Teaching', level: 'Expert', verified: true, years: 5 }]
+          ? [{ name: 'Teaching', level: 'Expert', verified: true, years: 5 }]
           : [{ name: 'Operations', level: 'Intermediate', verified: true, years: 3 }];
+
+      // In college mode, automatically include assigned subjects in skills for compatibility
+      const assignedSubjIds = step3Assignments.map((a) => a.subject_id).filter(Boolean);
+      const assignedSubjects = subjectsList.filter((s) => assignedSubjIds.includes(s.id));
+      for (const as of assignedSubjects) {
+        if (!skillsArray.some((sk) => sk.name.toLowerCase() === as.name.toLowerCase())) {
+          skillsArray.push({
+            name: as.name,
+            level: 'Expert',
+            verified: true,
+            years: 5.0,
+          });
+        }
+      }
+
+      // Build assignments payload
+      const assignmentsPayload = step3Assignments
+        .filter((r) => r.subject_id)
+        .map((r) => {
+          const sub = subjectsList.find((s) => s.id === r.subject_id);
+          const semObj = semestersList.find((s) => s.code === r.semester);
+          const prefList = r.preferred_periods
+            ? r.preferred_periods.split(',').map((p) => p.trim()).filter(Boolean)
+            : [];
+
+          return {
+            id: r.id,
+            subject_id: r.subject_id,
+            semester: r.semester || sub?.semester || 'S1',
+            semester_id: semObj?.id || sub?.semester_id,
+            department_id: r.department_id || personDeptId || sub?.department_id,
+            class_name: r.class_name || sub?.class_name || null,
+            required_periods: r.required_periods || 4,
+            required_hours: (r.required_periods || 4) * 1.0,
+            period_duration: r.period_duration || '1 hour',
+            allowed_working_days: r.allowed_working_days || DEFAULT_DAYS,
+            preferred_periods: prefList,
+            max_periods_per_day: 2,
+            assignment_status: 'active',
+          };
+        });
 
       const payload = {
         org_id: createdOrgId,
         name: personName.trim(),
-        email: personEmail.trim() || `${personName.toLowerCase().replace(/\s+/g, '.')}@example.com`,
-        role_title: personRole,
-        employee_code: `EMP-${Math.floor(100 + Math.random() * 900)}`,
+        email: personEmail.trim() || `${personName.toLowerCase().replace(/[^a-z0-9]/g, '.')}@institution.edu`,
+        role_title: personRole || (selectedType === 'college' ? 'Assistant Professor' : 'Staff'),
+        employee_code: `FAC-${Math.floor(100 + Math.random() * 900)}`,
         department_id: personDeptId || (departmentsList[0]?.id ?? undefined),
         profession_type: selectedType,
-        qualifications: personQuals ? personQuals.split(',').map((s) => s.trim()) : ['B.Tech'],
+        qualifications: personQuals ? personQuals.split(',').map((s) => s.trim()).filter(Boolean) : ['B.Tech'],
         skills: skillsArray,
         profession_metadata: {
-          semesters: [personSemesters],
-          classes: [personClasses],
+          semesters: Array.from(new Set(step3Assignments.map((a) => a.semester).filter(Boolean))),
         },
         max_hours_per_week: personWeeklyHours,
         status: 'active',
+        teacher_assignments: assignmentsPayload,
       };
 
-      const newP = await api.createPerson(payload);
-      setPeopleList([...peopleList, newP]);
+      if (editingPersonId) {
+        await api.updatePerson(editingPersonId, payload);
+        addToast(
+          'Teacher Updated',
+          `${personName} updated with ${assignmentsPayload.length} semester assignment(s).`,
+          'success'
+        );
+      } else {
+        const newP = await api.createPerson(payload);
+        addToast(
+          'Teacher Registered',
+          `${newP.name} added with ${assignmentsPayload.length} semester assignment(s).`,
+          'success'
+        );
+      }
+
+      const updated = await api.getPeople({ org_id: createdOrgId });
+      setPeopleList(updated);
+
+      // Reset form
+      setEditingPersonId(null);
       setPersonName('');
       setPersonEmail('');
-      addToast('Person Registered', `${newP.name} added to roster`, 'success');
+      setPersonRole('Assistant Professor');
+      setPersonQuals('M.Tech');
+      setPersonWeeklyHours(36);
+      setStep3Assignments([]);
+      setCollapsedAssignments({});
     } catch (err: any) {
-      addToast('Error', err.message, 'error');
+      addToast('Error', err.message || 'Failed to save teacher', 'error');
+    }
+  };
+
+  const handleStartEditPerson = async (p: Person) => {
+    triggerHaptic(10);
+    setEditingPersonId(p.id);
+    setPersonName(p.name || '');
+    setPersonEmail(p.email || '');
+    setPersonRole(p.role_title || 'Assistant Professor');
+    setPersonDeptId(p.department_id);
+    setPersonQuals((p.qualifications || []).join(', '));
+    setPersonWeeklyHours(p.max_hours_per_week || 36);
+
+    try {
+      let assignments = p.teacher_assignments;
+      if (!assignments || assignments.length === 0) {
+        assignments = await api.getTeacherAssignments(createdOrgId!, { person_id: p.id });
+      }
+      if (assignments && assignments.length > 0) {
+        setStep3Assignments(
+          assignments.map((a: any) => ({
+            id: a.id,
+            department_id: a.department_id || p.department_id,
+            semester: a.semester || 'S1',
+            subject_id: a.subject_id,
+            required_periods: a.required_periods || 4,
+            period_duration: a.period_duration || '1 hour',
+            allowed_working_days: a.allowed_working_days || DEFAULT_DAYS,
+            preferred_periods: Array.isArray(a.preferred_periods) ? a.preferred_periods.join(', ') : (a.preferred_periods || ''),
+            class_name: a.class_name || '',
+          }))
+        );
+      } else {
+        setStep3Assignments([]);
+      }
+    } catch (err) {
+      console.error('Failed to load assignments for editing:', err);
+      setStep3Assignments([]);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    triggerHaptic(10);
+    setEditingPersonId(null);
+    setPersonName('');
+    setPersonEmail('');
+    setPersonRole('Assistant Professor');
+    setPersonQuals('M.Tech');
+    setPersonWeeklyHours(36);
+    setStep3Assignments([]);
+    setCollapsedAssignments({});
+  };
+
+  const handleDeletePerson = async (id: number) => {
+    triggerHaptic(15);
+    try {
+      await api.deletePerson(id);
+      setPeopleList((prev) => prev.filter((p) => p.id !== id));
+      if (editingPersonId === id) {
+        handleCancelEdit();
+      }
+      addToast('Profile Removed', 'Teacher removed from roster', 'info');
+    } catch (err: any) {
+      addToast('Error', err.message || 'Failed to delete teacher', 'error');
     }
   };
 
@@ -405,23 +676,45 @@ export const OrgSelectionModule: React.FC = () => {
     triggerHaptic(15);
     const deptId = departmentsList[0]?.id;
 
+    const s3Sub = subjectsList.find((s) => s.semester === 'S3') || subjectsList[0];
+    const s5Sub = subjectsList.find((s) => s.semester === 'S5') || subjectsList[1] || subjectsList[0];
+    const s7Sub = subjectsList.find((s) => s.semester === 'S7') || subjectsList[2] || subjectsList[0];
+
     const samples =
       selectedType === 'college'
         ? [
-            { name: 'Dr. Alan Turing', role: 'Professor', quals: ['Ph.D CSE'], sem: 'S5', cls: 'CSE-A', hrs: 36 },
-            { name: 'Prof. Ada Lovelace', role: 'Associate Professor', quals: ['M.Tech CSE'], sem: 'S3', cls: 'CSE-B', hrs: 36 },
-            { name: 'Dr. Grace Hopper', role: 'Assistant Professor', quals: ['Ph.D Networks'], sem: 'S7', cls: 'CSE-A', hrs: 32 },
+            {
+              name: 'Dr. Alan Turing',
+              role: 'Professor',
+              quals: ['Ph.D CSE'],
+              assignments: s5Sub ? [{ subject_id: s5Sub.id, semester: 'S5', required_periods: 4, period_duration: '1 hour' }] : [],
+              hrs: 36,
+            },
+            {
+              name: 'Prof. Ada Lovelace',
+              role: 'Associate Professor',
+              quals: ['M.Tech CSE'],
+              assignments: s3Sub ? [{ subject_id: s3Sub.id, semester: 'S3', required_periods: 4, period_duration: '1 hour' }] : [],
+              hrs: 36,
+            },
+            {
+              name: 'Dr. Grace Hopper',
+              role: 'Assistant Professor',
+              quals: ['Ph.D Networks'],
+              assignments: s7Sub ? [{ subject_id: s7Sub.id, semester: 'S7', required_periods: 3, period_duration: '1 hour' }] : [],
+              hrs: 32,
+            },
           ]
         : selectedType === 'airline'
         ? [
-            { name: 'Captain James Kirk', role: 'Captain', quals: ['ATPL B737'], sem: '', cls: '', hrs: 36 },
-            { name: 'First Officer Spock', role: 'First Officer', quals: ['CPL Instrument'], sem: '', cls: '', hrs: 36 },
-            { name: 'Uhura Nyota', role: 'Lead Flight Attendant', quals: ['Safety Cert'], sem: '', cls: '', hrs: 40 },
+            { name: 'Captain James Kirk', role: 'Captain', quals: ['ATPL B737'], assignments: [], hrs: 36 },
+            { name: 'First Officer Spock', role: 'First Officer', quals: ['CPL Instrument'], assignments: [], hrs: 36 },
+            { name: 'Uhura Nyota', role: 'Lead Flight Attendant', quals: ['Safety Cert'], assignments: [], hrs: 40 },
           ]
         : [
-            { name: 'Sarah Connor', role: 'Senior Tech Lead', quals: ['B.S. CS'], sem: '', cls: '', hrs: 40 },
-            { name: 'John Doe', role: 'Full Stack Engineer', quals: ['B.S. IT'], sem: '', cls: '', hrs: 40 },
-            { name: 'Elena Rostova', role: 'Product Manager', quals: ['MBA'], sem: '', cls: '', hrs: 40 },
+            { name: 'Sarah Connor', role: 'Senior Tech Lead', quals: ['B.S. CS'], assignments: [], hrs: 40 },
+            { name: 'John Doe', role: 'Full Stack Engineer', quals: ['B.S. IT'], assignments: [], hrs: 40 },
+            { name: 'Elena Rostova', role: 'Product Manager', quals: ['MBA'], assignments: [], hrs: 40 },
           ];
 
     try {
@@ -436,9 +729,10 @@ export const OrgSelectionModule: React.FC = () => {
           profession_type: selectedType,
           qualifications: s.quals,
           skills: [{ name: 'Core Skill', level: 'Expert', verified: true, years: 5 }],
-          profession_metadata: { semesters: [s.sem], classes: [s.cls] },
+          profession_metadata: { semesters: s.assignments?.map((a: any) => a.semester) || [] },
           max_hours_per_week: s.hrs,
           status: 'active',
+          teacher_assignments: (s as any).assignments || [],
         });
       }
       const updated = await api.getPeople({ org_id: createdOrgId });
@@ -456,7 +750,7 @@ export const OrgSelectionModule: React.FC = () => {
         settings_json: { setup_step: 4 },
       });
     }
-    addToast('Step 3 Complete', 'Staff profiles saved. Moving to Step 4: Subjects & Duties', 'success');
+    addToast('Step 3 Complete', 'Teacher assignments saved. Moving to Step 4: Subjects & Duties', 'success');
     setCurrentStep(4);
   };
 
@@ -501,8 +795,12 @@ export const OrgSelectionModule: React.FC = () => {
     triggerHaptic(15);
     const deptId = departmentsList[0]?.id;
     const defaults = [
-      { name: 'Database Management Systems', code: 'CS301', sem: 'S5', cls: 'CSE-A', hrs: 4, lab: false },
       { name: 'Data Structures & Algorithms', code: 'CS201', sem: 'S3', cls: 'CSE-A', hrs: 4, lab: false },
+      { name: 'Database Management Systems', code: 'CS301', sem: 'S5', cls: 'CSE-A', hrs: 4, lab: false },
+      { name: 'Machine Learning', code: 'CS401', sem: 'S7', cls: 'CSE-A', hrs: 4, lab: false },
+      { name: 'Programming in Python', code: 'CS101', sem: 'S1', cls: 'CSE-A', hrs: 4, lab: false },
+      { name: 'Computer Networks', code: 'CS302', sem: 'S5', cls: 'CSE-A', hrs: 4, lab: false },
+      { name: 'Artificial Intelligence', code: 'CS402', sem: 'S7', cls: 'CSE-A', hrs: 3, lab: false },
       { name: 'Database Systems Lab', code: 'CS304L', sem: 'S5', cls: 'CSE-A', hrs: 2, lab: true },
     ];
 
@@ -519,8 +817,8 @@ export const OrgSelectionModule: React.FC = () => {
         });
       }
       const updated = await api.getSubjects(createdOrgId);
-      setSubjectsList(updated);
-      addToast('Curriculum Configured', `Added ${defaults.length} foundational courses`, 'success');
+      setSubjectsList(updated || []);
+      addToast('Curriculum Configured', `Added ${defaults.length} foundational courses across semesters S1-S7`, 'success');
     } catch (err: any) {
       addToast('Error', err.message, 'error');
     }
@@ -1098,17 +1396,21 @@ export const OrgSelectionModule: React.FC = () => {
             <div className="space-y-6 animate-in fade-in duration-200">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                    Step 3: {selectedType === 'college' ? 'Faculty & Teachers' : 'Staff & Personnel'}
+                  <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <GraduationCap className="w-5 h-5 text-blue-600" />
+                    <span>Step 3: {selectedType === 'college' ? 'Faculty & Teachers' : 'Staff & Personnel'}</span>
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Add educators or employees with their qualifications, department, and teaching limits.
+                    {selectedType === 'college'
+                      ? 'Register teachers and assign their semester-wise subjects, teaching periods, and working hours.'
+                      : 'Add employees with their qualifications, department, and weekly work limits.'}
                   </p>
                 </div>
                 {peopleList.length === 0 && (
                   <button
+                    type="button"
                     onClick={handleSeedSampleStaff}
-                    className="px-3 py-1.5 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20 text-xs font-semibold flex items-center gap-1.5"
+                    className="px-3 py-1.5 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20 text-xs font-semibold flex items-center gap-1.5 transition-all"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
                     <span>Add Sample Staff</span>
@@ -1116,154 +1418,643 @@ export const OrgSelectionModule: React.FC = () => {
                 )}
               </div>
 
-              {/* Add Person Form */}
-              <div className="p-5 rounded-2xl glass-card border border-white/40 dark:border-white/10 space-y-4">
-                <div className="font-bold text-xs text-slate-700 dark:text-slate-300">
-                  Register New {selectedType === 'college' ? 'Faculty Member' : 'Employee'}
+              {/* Add / Edit Person Form */}
+              <div className="p-6 rounded-3xl glass-card border border-white/40 dark:border-white/10 space-y-5 shadow-sm">
+                {editingPersonId && (
+                  <div className="p-3.5 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-between text-xs text-blue-700 dark:text-blue-300">
+                    <div className="flex items-center gap-2 font-bold">
+                      <Edit2 className="w-4 h-4 text-blue-600" />
+                      <span>Editing Teacher: {personName}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleCancelEdit}
+                      className="px-2.5 py-1 rounded-lg bg-white/60 dark:bg-slate-800/60 hover:bg-white text-slate-700 dark:text-slate-200 text-xs font-semibold transition-all"
+                    >
+                      Cancel Edit
+                    </button>
+                  </div>
+                )}
+
+                <div className="border-b border-slate-200/50 dark:border-slate-800/80 pb-3 flex items-center justify-between">
+                  <div>
+                    <h3 className="font-extrabold text-sm text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                      <BookOpen className="w-4 h-4 text-blue-600" />
+                      <span>{editingPersonId ? 'EDIT TEACHER DETAILS' : 'TEACHER DETAILS'}</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Configure teacher personal info and assign their individual semester subjects directly below.
+                    </p>
+                  </div>
                 </div>
+
+                {/* Section 1: Teacher Basic Info */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-500 mb-1">Full Name *</label>
+                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Teacher Name *
+                    </label>
                     <input
                       type="text"
                       value={personName}
                       onChange={(e) => setPersonName(e.target.value)}
                       placeholder="e.g. Dr. Eleanor Vance"
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-500 mb-1">Role / Title</label>
+                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Department *
+                    </label>
+                    <select
+                      value={personDeptId || ''}
+                      onChange={(e) => setPersonDeptId(e.target.value ? Number(e.target.value) : undefined)}
+                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                    >
+                      <option value="">-- Select Department --</option>
+                      {departmentsList.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Designation / Role
+                    </label>
                     <input
                       type="text"
                       value={personRole}
                       onChange={(e) => setPersonRole(e.target.value)}
-                      placeholder="e.g. Associate Professor"
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                      placeholder="e.g. Assistant Professor"
+                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-500 mb-1">Department</label>
-                    <select
-                      value={personDeptId || ''}
-                      onChange={(e) => setPersonDeptId(e.target.value ? Number(e.target.value) : undefined)}
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                    >
-                      <option value="">General (No Dept)</option>
-                      {departmentsList.map((d) => (
-                        <option key={d.id} value={d.id}>{d.name}</option>
-                      ))}
-                    </select>
+                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Email Address
+                    </label>
+                    <input
+                      type="email"
+                      value={personEmail}
+                      onChange={(e) => setPersonEmail(e.target.value)}
+                      placeholder="e.g. teacher@institution.edu"
+                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Qualifications
+                    </label>
+                    <input
+                      type="text"
+                      value={personQuals}
+                      onChange={(e) => setPersonQuals(e.target.value)}
+                      placeholder="e.g. M.Tech, Ph.D"
+                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Max Weekly Hours
+                    </label>
+                    <input
+                      type="number"
+                      value={personWeeklyHours}
+                      min="5"
+                      max="60"
+                      onChange={(e) => setPersonWeeklyHours(Number(e.target.value))}
+                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                    />
                   </div>
                 </div>
 
-                {selectedType === 'college' ? (
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Qualifications</label>
-                      <input
-                        type="text"
-                        value={personQuals}
-                        onChange={(e) => setPersonQuals(e.target.value)}
-                        placeholder="M.Tech, Ph.D"
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
+                {/* Section 2: SUBJECTS AND SEMESTERS ASSIGNED TO THIS TEACHER */}
+                {selectedType === 'college' && (
+                  <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-5 space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-blue-500/5 p-4 rounded-2xl border border-blue-500/20">
+                      <div>
+                        <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                          <BookOpen className="w-4 h-4 text-blue-600" />
+                          <span>SUBJECTS AND SEMESTERS ASSIGNED TO THIS TEACHER</span>
+                        </h4>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          Assign multiple semester subjects with required weekly periods, duration, and preferred working days.
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2 self-start sm:self-auto">
+                        <button
+                          type="button"
+                          onClick={() => setShowQuickAddSub(!showQuickAddSub)}
+                          className="px-3 py-1.5 rounded-xl glass-pill text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 flex items-center gap-1"
+                          title="Create a new subject if not in list"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>New Subject</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleAddStep3Assignment}
+                          className="px-4 py-2 rounded-xl glass-button-primary text-xs font-bold flex items-center gap-1.5 shadow-sm"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>+ ADD SEMESTER ASSIGNMENT</span>
+                        </button>
+                      </div>
                     </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Semester(s)</label>
-                      <input
-                        type="text"
-                        value={personSemesters}
-                        onChange={(e) => setPersonSemesters(e.target.value)}
-                        placeholder="S3, S5"
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Class / Section</label>
-                      <input
-                        type="text"
-                        value={personClasses}
-                        onChange={(e) => setPersonClasses(e.target.value)}
-                        placeholder="CSE-A"
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Max Weekly Hours</label>
-                      <input
-                        type="number"
-                        value={personWeeklyHours}
-                        onChange={(e) => setPersonWeeklyHours(Number(e.target.value))}
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Qualifications / Skills</label>
-                      <input
-                        type="text"
-                        value={personQuals}
-                        onChange={(e) => setPersonQuals(e.target.value)}
-                        placeholder="e.g. Certified Engineer / ATPL"
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Max Weekly Hours</label>
-                      <input
-                        type="number"
-                        value={personWeeklyHours}
-                        onChange={(e) => setPersonWeeklyHours(Number(e.target.value))}
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
-                    </div>
+
+                    {/* Quick Add Subject Inline Panel */}
+                    {showQuickAddSub && (
+                      <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-blue-500/30 space-y-3 animate-in fade-in">
+                        <div className="font-bold text-xs text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                          <span>Quick Create Subject</span>
+                          <button
+                            type="button"
+                            onClick={() => setShowQuickAddSub(false)}
+                            className="text-slate-400 hover:text-slate-600"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 mb-1">Subject Name *</label>
+                            <input
+                              type="text"
+                              placeholder="e.g. Distributed Systems"
+                              value={quickSubName}
+                              onChange={(e) => setQuickSubName(e.target.value)}
+                              className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 mb-1">Semester</label>
+                            <select
+                              value={quickSubSemester}
+                              onChange={(e) => setQuickSubSemester(e.target.value)}
+                              className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                            >
+                              {semestersList.map((s) => (
+                                <option key={s.id} value={s.code}>
+                                  {s.code} ({s.name})
+                                </option>
+                              ))}
+                              {semestersList.length === 0 &&
+                                ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'].map((s) => (
+                                  <option key={s} value={s}>
+                                    {s}
+                                  </option>
+                                ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 mb-1">Department</label>
+                            <select
+                              value={quickSubDeptId || personDeptId || ''}
+                              onChange={(e) => setQuickSubDeptId(e.target.value ? Number(e.target.value) : undefined)}
+                              className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                            >
+                              {departmentsList.map((d) => (
+                                <option key={d.id} value={d.id}>
+                                  {d.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={handleQuickAddSubject}
+                            disabled={!quickSubName.trim()}
+                            className="px-3.5 py-1.5 rounded-xl glass-button-primary text-xs font-bold"
+                          >
+                            Save Subject
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Assignment Rows List */}
+                    {step3Assignments.length === 0 ? (
+                      <div className="p-6 rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 text-center space-y-2">
+                        <BookOpen className="w-8 h-8 text-slate-400 mx-auto" />
+                        <div className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                          No semester assignments added yet.
+                        </div>
+                        <p className="text-[11px] text-slate-400">
+                          Click the <strong>"+ ADD SEMESTER ASSIGNMENT"</strong> button above to configure subjects, semesters, and periods for this teacher.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {step3Assignments.map((row, idx) => {
+                          const isCollapsed = collapsedAssignments[idx];
+                          const rowDeptId = row.department_id || personDeptId;
+                          const filteredSubjects = subjectsList.filter((s) => {
+                            const matchSem = !row.semester || !s.semester || s.semester === row.semester;
+                            if (!rowDeptId || !s.department_id) return matchSem;
+                            return matchSem && s.department_id === rowDeptId;
+                          });
+                          const rowSemesterSubjects =
+                            filteredSubjects.length > 0
+                              ? filteredSubjects
+                              : subjectsList.filter((s) => !row.semester || !s.semester || s.semester === row.semester);
+
+                          const selectedSubjectObj = subjectsList.find((s) => s.id === row.subject_id);
+
+                          return (
+                            <div
+                              key={idx}
+                              className="rounded-2xl glass-panel border border-slate-200 dark:border-slate-700/80 bg-white/70 dark:bg-slate-900/70 overflow-hidden shadow-sm"
+                            >
+                              {/* Collapsible Row Header */}
+                              <div className="p-3.5 bg-slate-50/60 dark:bg-slate-800/40 border-b border-slate-200/50 dark:border-slate-800/80 flex items-center justify-between">
+                                <div className="flex items-center gap-2.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleCollapseAssignment(idx)}
+                                    className="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors"
+                                    title={isCollapsed ? 'Expand Assignment' : 'Collapse Assignment'}
+                                  >
+                                    {isCollapsed ? (
+                                      <ChevronRight className="w-4 h-4" />
+                                    ) : (
+                                      <ChevronDown className="w-4 h-4" />
+                                    )}
+                                  </button>
+                                  <span className="w-6 h-6 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold text-xs">
+                                    {idx + 1}
+                                  </span>
+                                  <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                                    Assignment {idx + 1}
+                                  </span>
+                                  {row.semester && (
+                                    <span className="px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 text-[10px] font-bold">
+                                      {row.semester}
+                                    </span>
+                                  )}
+                                  {selectedSubjectObj && (
+                                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-semibold truncate max-w-[180px]">
+                                      {selectedSubjectObj.name}
+                                    </span>
+                                  )}
+                                  <span className="text-[10px] text-slate-400">
+                                    • {row.required_periods} periods/wk ({row.period_duration})
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveStep3Assignment(idx)}
+                                    className="px-2 py-1 rounded-lg text-red-500 hover:bg-red-500/10 text-[11px] font-semibold flex items-center gap-1 transition-colors"
+                                    title="Remove assignment"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>Remove</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Collapsible Body */}
+                              {!isCollapsed && (
+                                <div className="p-4 space-y-4">
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+                                    {/* 1. Department */}
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                                        1. Department *
+                                      </label>
+                                      <select
+                                        value={rowDeptId || ''}
+                                        onChange={(e) => {
+                                          const newDept = e.target.value ? Number(e.target.value) : undefined;
+                                          handleUpdateStep3Assignment(idx, {
+                                            department_id: newDept,
+                                            subject_id: undefined,
+                                          });
+                                        }}
+                                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                                      >
+                                        <option value="">-- All / General Department --</option>
+                                        {departmentsList.map((d) => (
+                                          <option key={d.id} value={d.id}>
+                                            {d.name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+
+                                    {/* 2. Semester */}
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                                        2. Semester *
+                                      </label>
+                                      <select
+                                        required
+                                        value={row.semester}
+                                        onChange={(e) => {
+                                          const newSem = e.target.value;
+                                          handleUpdateStep3Assignment(idx, {
+                                            semester: newSem,
+                                            subject_id: undefined,
+                                          });
+                                        }}
+                                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                                      >
+                                        {semestersList.map((sem) => (
+                                          <option key={sem.id} value={sem.code}>
+                                            {sem.code} ({sem.name})
+                                          </option>
+                                        ))}
+                                        {semestersList.length === 0 &&
+                                          ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'].map((s) => (
+                                            <option key={s} value={s}>
+                                              {s}
+                                            </option>
+                                          ))}
+                                      </select>
+                                    </div>
+
+                                    {/* 3. Subject (Filtered dynamically by department and semester) */}
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                                        3. Subject *
+                                      </label>
+                                      <select
+                                        required
+                                        value={row.subject_id || ''}
+                                        onChange={(e) => {
+                                          handleUpdateStep3Assignment(idx, {
+                                            subject_id: Number(e.target.value) || undefined,
+                                          });
+                                        }}
+                                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
+                                      >
+                                        <option value="">-- Select Subject for {row.semester} --</option>
+                                        {rowSemesterSubjects.map((sub) => (
+                                          <option key={sub.id} value={sub.id}>
+                                            {sub.name} {sub.code ? `(${sub.code})` : ''}
+                                          </option>
+                                        ))}
+                                        {rowSemesterSubjects.length === 0 && (
+                                          <option value="" disabled>
+                                            No subjects available for {row.semester}
+                                          </option>
+                                        )}
+                                      </select>
+                                    </div>
+
+                                    {/* 4. Required Periods/Wk */}
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                                        4. Required Periods/Wk *
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        max="25"
+                                        required
+                                        value={row.required_periods}
+                                        onChange={(e) =>
+                                          handleUpdateStep3Assignment(idx, {
+                                            required_periods: Number(e.target.value) || 4,
+                                          })
+                                        }
+                                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                                      />
+                                    </div>
+
+                                    {/* 5. Period Duration */}
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                                        5. Period Duration
+                                      </label>
+                                      <select
+                                        value={row.period_duration}
+                                        onChange={(e) =>
+                                          handleUpdateStep3Assignment(idx, { period_duration: e.target.value })
+                                        }
+                                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                                      >
+                                        {DURATION_OPTIONS.map((dur) => (
+                                          <option key={dur} value={dur}>
+                                            {dur}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+
+                                    {/* Optional Class / Section */}
+                                    <div>
+                                      <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                                        Class / Section (Optional)
+                                      </label>
+                                      <input
+                                        type="text"
+                                        placeholder="e.g. S3 A or CSE-A"
+                                        value={row.class_name || ''}
+                                        onChange={(e) =>
+                                          handleUpdateStep3Assignment(idx, { class_name: e.target.value })
+                                        }
+                                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  {/* Preferred Periods & Working Days */}
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                                        Preferred Periods / Times (Optional)
+                                      </label>
+                                      <input
+                                        type="text"
+                                        placeholder="e.g. Period 1, Period 2, 09:00-11:00"
+                                        value={row.preferred_periods}
+                                        onChange={(e) =>
+                                          handleUpdateStep3Assignment(idx, { preferred_periods: e.target.value })
+                                        }
+                                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                                      />
+                                    </div>
+
+                                    <div>
+                                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                                        Preferred Working Days:
+                                      </label>
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {DAY_LABELS.map(({ label, day }) => {
+                                          const isSelected = row.allowed_working_days.includes(day);
+                                          return (
+                                            <button
+                                              key={day}
+                                              type="button"
+                                              onClick={() => {
+                                                const updatedDays = isSelected
+                                                  ? row.allowed_working_days.filter((d) => d !== day)
+                                                  : [...row.allowed_working_days, day].sort();
+                                                handleUpdateStep3Assignment(idx, {
+                                                  allowed_working_days: updatedDays,
+                                                });
+                                              }}
+                                              className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition-colors ${
+                                                isSelected
+                                                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                                  : 'bg-white/40 dark:bg-slate-800/40 text-slate-500 border-slate-200/50 dark:border-slate-700/50 hover:bg-slate-100'
+                                              }`}
+                                            >
+                                              {label}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
 
-                <div className="flex justify-end">
+                {/* Form Submit Buttons */}
+                <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200/50 dark:border-slate-800/80">
+                  {editingPersonId && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEdit}
+                      className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={handleAddPerson}
-                    className="px-4 py-2 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-1.5"
+                    className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-bold flex items-center gap-1.5 shadow-md shadow-blue-500/20"
                   >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add {selectedType === 'college' ? 'Teacher' : 'Employee'}</span>
+                    {editingPersonId ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>Update Teacher</span>
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-4 h-4" />
+                        <span>Add {selectedType === 'college' ? 'Teacher' : 'Employee'}</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
 
               {/* Staff List */}
-              <div className="space-y-2">
-                <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                  Registered Staff Members ({peopleList.length})
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Registered Faculty & Staff Members ({peopleList.length})
+                  </div>
                 </div>
+
                 {peopleList.length === 0 ? (
                   <div className="p-6 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 text-center text-xs text-slate-400">
                     No employees added yet. Click 'Add Sample Staff' or register teachers using the form above.
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                    {peopleList.map((p) => (
-                      <div
-                        key={p.id}
-                        className="p-3 rounded-xl glass-card border border-white/40 dark:border-white/10 flex items-center justify-between text-xs"
-                      >
-                        <div>
-                          <div className="font-bold text-slate-900 dark:text-white">{p.name}</div>
-                          <div className="text-[11px] text-slate-500">
-                            {p.role_title} • {p.department_name || 'General'} • Max {p.max_hours_per_week}h/wk
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {peopleList.map((p) => {
+                      const assignments = p.teacher_assignments || [];
+                      return (
+                        <div
+                          key={p.id}
+                          className={`p-4 rounded-2xl glass-card border transition-all ${
+                            editingPersonId === p.id
+                              ? 'border-blue-500 ring-2 ring-blue-500/20 bg-blue-500/5'
+                              : 'border-white/40 dark:border-white/10'
+                          } flex flex-col justify-between gap-3 text-xs`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <div className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                <span>{p.name}</span>
+                                <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/10 text-emerald-600 font-semibold">
+                                  Active
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-500 mt-0.5">
+                                {p.role_title} •{' '}
+                                {p.department_name ||
+                                  departmentsList.find((d) => d.id === p.department_id)?.name ||
+                                  'General'}{' '}
+                                • Max {p.max_hours_per_week}h/wk
+                              </div>
+                            </div>
+
+                            {/* Action buttons */}
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditPerson(p)}
+                                className="p-1.5 rounded-lg hover:bg-blue-500/10 text-blue-600 dark:text-blue-400 transition-colors"
+                                title="Edit Teacher and Assignments"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeletePerson(p.id)}
+                                className="p-1.5 rounded-lg hover:bg-red-500/10 text-red-500 transition-colors"
+                                title="Remove Teacher"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
+
+                          {/* Assignments Badges */}
+                          {selectedType === 'college' && (
+                            <div className="pt-2 border-t border-slate-200/50 dark:border-slate-800/80">
+                              <div className="text-[10px] font-bold text-slate-500 mb-1.5 flex items-center gap-1">
+                                <BookOpen className="w-3 h-3 text-blue-500" />
+                                <span>Assigned Semester Subjects ({assignments.length}):</span>
+                              </div>
+                              {assignments.length === 0 ? (
+                                <span className="text-[10px] text-slate-400 italic">
+                                  No semester assignments configured
+                                </span>
+                              ) : (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {assignments.map((a: any, aIdx: number) => (
+                                    <span
+                                      key={a.id || aIdx}
+                                      className="px-2 py-1 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 text-[10px] font-medium border border-blue-500/20"
+                                    >
+                                      <strong>{a.semester || 'S1'}</strong>:{' '}
+                                      {a.subject_name ||
+                                        subjectsList.find((s) => s.id === a.subject_id)?.name ||
+                                        'Subject'}{' '}
+                                      ({a.required_periods || 4}p/wk)
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
-                        <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/10 text-emerald-600 font-semibold">
-                          Active
-                        </span>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1665,17 +2456,20 @@ export const OrgSelectionModule: React.FC = () => {
                 </div>
               )}
 
-              {/* Big Smart Roster Generator Button */}
+              {/* Big GLIXON Timetable Generator Button */}
               <div className="p-6 rounded-3xl bg-gradient-to-r from-blue-600/10 via-indigo-600/10 to-purple-600/10 border border-blue-500/20 text-center space-y-4">
                 <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white flex items-center justify-center mx-auto shadow-lg shadow-blue-500/30">
                   <Sparkles className="w-6 h-6 animate-pulse" />
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                    Google OR-Tools Constraint Optimization Engine
+                    GLIXON
                   </h3>
+                  <div className="text-xs font-semibold text-blue-600 dark:text-blue-400 mt-0.5">
+                    Intelligent Timetable Generator
+                  </div>
                   <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
-                    Solves teacher-subject compatibility, prevents overlapping slots, enforces working hour limits, and minimizes workload variance.
+                    Solves teacher-subject compatibility, prevents overlapping slots, enforces working hour limits, and generates conflict-free schedules.
                   </p>
                 </div>
 
@@ -1690,8 +2484,11 @@ export const OrgSelectionModule: React.FC = () => {
                   }`}
                 >
                   <Sparkles className={`w-4 h-4 ${isGenerating ? 'animate-spin' : ''}`} />
-                  <span>{isGenerating ? 'Optimizing Schedule with CP-SAT...' : 'Smart Roster Generator'}</span>
+                  <span>{isGenerating ? 'Optimizing Schedule with GLIXON...' : 'GLIXON'}</span>
                 </button>
+                <div className="text-[11px] text-slate-500 font-medium">
+                  Intelligent Timetable Generator
+                </div>
               </div>
 
               {/* Generation Preview Modal / Card */}

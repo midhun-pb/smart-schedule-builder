@@ -203,6 +203,24 @@ class PersonBase(BaseModel):
 class PersonCreate(PersonBase):
     org_id: int
 
+class PersonUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    role_title: Optional[str] = None
+    employee_code: Optional[str] = None
+    profession_type: Optional[str] = None
+    qualifications: Optional[List[str]] = None
+    skills: Optional[List[Dict[str, Any]]] = None
+    inferred_skills: Optional[List[Dict[str, Any]]] = None
+    preferences: Optional[Dict[str, Any]] = None
+    profession_metadata: Optional[Dict[str, Any]] = None
+    department_id: Optional[int] = None
+    max_hours_per_week: Optional[float] = None
+    status: Optional[str] = None
+    hire_date: Optional[str] = None
+    teacher_assignments: Optional[List[Dict[str, Any]]] = None
+
 class PersonResponse(PersonBase):
     id: int
     org_id: int
