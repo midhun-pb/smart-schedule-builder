@@ -102,12 +102,24 @@ class ApiClient {
     const qs = query.toString() ? `?${query.toString()}` : '';
     return this.request<any[]>(`/organizations/${orgId}/teacher-assignments${qs}`);
   };
+  getTeacherAssignmentsByPerson = (orgId: number, personId: number) =>
+    this.request<any>(`/organizations/${orgId}/teachers/${personId}/assignments`);
   createTeacherAssignment = (orgId: number, data: any) =>
     this.request<any>(`/organizations/${orgId}/teacher-assignments`, { method: 'POST', body: JSON.stringify(data) });
   updateTeacherAssignment = (orgId: number, id: number, data: any) =>
     this.request<any>(`/organizations/${orgId}/teacher-assignments/${id}`, { method: 'PUT', body: JSON.stringify(data) });
   deleteTeacherAssignment = (orgId: number, id: number) =>
     this.request<any>(`/organizations/${orgId}/teacher-assignments/${id}`, { method: 'DELETE' });
+
+  // Period Configuration & Teacher Workloads
+  getPeriodConfig = (orgId: number) =>
+    this.request<any>(`/organizations/${orgId}/period-config`);
+  updatePeriodConfig = (orgId: number, data: any) =>
+    this.request<any>(`/organizations/${orgId}/period-config`, { method: 'PUT', body: JSON.stringify(data) });
+  getTeacherWorkloads = (orgId: number, scheduleId?: number) => {
+    const qs = scheduleId ? `?schedule_id=${scheduleId}` : '';
+    return this.request<any>(`/organizations/${orgId}/teacher-workloads${qs}`);
+  };
 
   // Roster Readiness
   getRosterReadiness = (orgId: number) =>
@@ -166,6 +178,31 @@ class ApiClient {
     only_unassigned?: boolean;
   }) =>
     this.request<any>('/schedules/generate', { method: 'POST', body: JSON.stringify(payload) });
+
+  glixonGenerate = (payload: {
+    org_id: number;
+    schedule_id?: number;
+    title?: string;
+    period_start: string;
+    period_end: string;
+    preview?: boolean;
+    fairness_weight?: number;
+    preference_weight?: number;
+    overtime_penalty_weight?: number;
+    selected_teacher_ids?: number[];
+    selected_semesters?: string[];
+  }) =>
+    this.request<any>('/schedules/glixon-generate', { method: 'POST', body: JSON.stringify(payload) });
+
+  glixonCommit = (payload: {
+    org_id: number;
+    schedule_id?: number;
+    title?: string;
+    period_start: string;
+    period_end: string;
+    assignments: any[];
+  }) =>
+    this.request<any>('/schedules/glixon-commit', { method: 'POST', body: JSON.stringify(payload) });
 
   createSlot = (data: any) =>
     this.request<any>('/schedules/slots', { method: 'POST', body: JSON.stringify(data) });

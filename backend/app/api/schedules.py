@@ -10,7 +10,8 @@ from app.models.models import (
 )
 from app.schemas.schemas import (
     ScheduleGenerateRequest, SlotCreate, SlotUpdate,
-    AssignmentUpdate, DragDropAssignRequest, CopyWeekRequest
+    AssignmentUpdate, DragDropAssignRequest, CopyWeekRequest,
+    GlixonGenerateRequest, GlixonCommitRequest
 )
 from app.services.scheduling_engine import SchedulingEngine
 from app.core.time_utils import (
@@ -902,7 +903,12 @@ def generate_schedule(req: ScheduleGenerateRequest, db: Session = Depends(get_db
             "person_id": ta.person_id,
             "subject_id": ta.subject_id,
             "semester": ta.semester,
-            "class_name": ta.class_name
+            "class_name": ta.class_name,
+            "required_periods": getattr(ta, "required_periods", 4) or 4,
+            "allowed_working_days": getattr(ta, "allowed_working_days", [0, 1, 2, 3, 4]) or [0, 1, 2, 3, 4],
+            "preferred_periods": getattr(ta, "preferred_periods", []) or [],
+            "unavailable_periods": getattr(ta, "unavailable_periods", []) or [],
+            "max_periods_per_day": getattr(ta, "max_periods_per_day", 2) or 2,
         }
         for ta in teacher_assignments
     ]
@@ -1186,4 +1192,485 @@ def add_lab_session(schedule_id: int, req: AddLabRequest, db: Session = Depends(
         "message": f"Successfully scheduled {slot_title} for {teacher.name}.",
         "slot_id": new_slot.id,
         "assignment_id": new_assign.id
+    }
+
+# ==============================================================================
+# GLIXON — Intelligent Timetable Generator Endpoints (Preview & Commit)
+# ==============================================================================
+
+@router.post("/glixon-generate")
+def glixon_generate_schedule(req: GlixonGenerateRequest, db: Session = Depends(get_db)):
+    """
+    GLIXON Intelligent Timetable Generator:
+    Reads teacher configurations, multi-semester assignments, department subjects,
+    working days, periods, teacher availability, and resource constraints.
+    Executes Google OR-Tools CP-SAT constraint optimization.
+    Returns preview without overwriting unless preview=False.
+    """
+    org = db.query(Organization).filter(Organization.id == req.org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Locate or create draft schedule
+    sched = None
+    if req.schedule_id:
+        sched = db.query(Schedule).filter(Schedule.id == req.schedule_id, Schedule.org_id == req.org_id).first()
+    if not sched:
+        sched = db.query(Schedule).filter(
+            Schedule.org_id == req.org_id,
+            Schedule.title == req.title
+        ).first()
+
+    if not sched:
+        sched = Schedule(
+            org_id=req.org_id,
+            title=req.title,
+            period_start=req.period_start,
+            period_end=req.period_end,
+            status="draft",
+            version=1
+        )
+        db.add(sched)
+        db.commit()
+        db.refresh(sched)
+
+    # Fetch active teachers and teacher-subject assignments
+    people_query = db.query(Person).filter(Person.org_id == req.org_id, Person.status == "active")
+    if req.selected_teacher_ids:
+        people_query = people_query.filter(Person.id.in_(req.selected_teacher_ids))
+    people = people_query.all()
+
+    ta_query = db.query(TeacherSubjectAssignment).filter(
+        TeacherSubjectAssignment.org_id == req.org_id,
+        TeacherSubjectAssignment.assignment_status == "active"
+    )
+    if req.selected_teacher_ids:
+        ta_query = ta_query.filter(TeacherSubjectAssignment.person_id.in_(req.selected_teacher_ids))
+    if req.selected_semesters:
+        ta_query = ta_query.filter(TeacherSubjectAssignment.semester.in_(req.selected_semesters))
+    teacher_assignments = ta_query.all()
+
+    # Provision requirement slots from working_days_schedule if none exist
+    all_slots = db.query(RequirementSlot).filter(RequirementSlot.schedule_id == sched.id).all()
+    from app.api.organizations import get_default_working_days_schedule
+    working_sched = (org.settings_json.get("working_days_schedule") if org.settings_json else None) or get_default_working_days_schedule(org.type)
+    resources = db.query(Resource).filter(Resource.org_id == req.org_id).all()
+    departments = db.query(Department).filter(Department.org_id == req.org_id).all()
+    res_id = resources[0].id if resources else None
+    dept_id = departments[0].id if departments else None
+
+    if not all_slots:
+        curr = datetime.datetime.strptime(req.period_start, "%Y-%m-%d").date()
+        end_d = datetime.datetime.strptime(req.period_end, "%Y-%m-%d").date()
+        slot_objects = []
+        slot_order_idx = 0
+
+        # Collect distinct class cohorts from teacher assignments or subjects
+        classes_in_org = list({ta.class_name for ta in teacher_assignments if ta.class_name})
+        if not classes_in_org:
+            subs = db.query(Subject).filter(Subject.org_id == req.org_id).all()
+            classes_in_org = list({s.class_name for s in subs if s.class_name}) or ["Section A"]
+
+        while curr <= end_d:
+            day_idx = curr.weekday()
+            day_cfg = working_sched.get(str(day_idx))
+            if day_cfg and day_cfg.get("is_working_day"):
+                for p in day_cfg.get("periods", []):
+                    p_type = p.get("type", "lecture")
+                    is_break = p_type in ["break", "lunch", "assembly"]
+
+                    for c_name in classes_in_org:
+                        # Find matching subject for this class
+                        matched_ta = next((ta for ta in teacher_assignments if ta.class_name == c_name), None)
+                        chosen_sub_id = matched_ta.subject_id if matched_ta else None
+                        chosen_sub = matched_ta.subject if matched_ta else None
+                        chosen_dept_id = matched_ta.department_id if matched_ta else dept_id
+                        chosen_sem = matched_ta.semester if matched_ta else None
+
+                        slot_title = f"{chosen_sub.name if chosen_sub else p.get('name', 'Lecture')} ({c_name})"
+                        slot_meta = {
+                            "subject": chosen_sub.name if chosen_sub else None,
+                            "semester": chosen_sem,
+                            "class": c_name,
+                            "class_name": c_name,
+                            "subject_id": chosen_sub_id,
+                            "lab": chosen_sub.is_lab if chosen_sub else False
+                        }
+
+                        s_obj = RequirementSlot(
+                            org_id=req.org_id,
+                            schedule_id=sched.id,
+                            subject_id=chosen_sub_id,
+                            title=slot_title,
+                            date_str=curr.strftime("%Y-%m-%d"),
+                            day_of_week=day_idx,
+                            start_time=p.get("start_time", "09:00"),
+                            end_time=p.get("end_time", "10:00"),
+                            resource_id=res_id,
+                            department_id=chosen_dept_id,
+                            min_staff=0 if is_break else 1,
+                            target_staff=0 if is_break else 1,
+                            max_staff=0 if is_break else 1,
+                            slot_order=slot_order_idx,
+                            period_type="break" if is_break else "work",
+                            is_locked=False,
+                            profession_metadata=slot_meta,
+                            required_skills=[chosen_sub.name] if (chosen_sub and not is_break) else []
+                        )
+                        db.add(s_obj)
+                        slot_objects.append(s_obj)
+                        slot_order_idx += 1
+            curr += datetime.timedelta(days=1)
+        db.commit()
+        all_slots = slot_objects
+
+    # Filter teaching slots
+    slots_to_solve = [s for s in all_slots if getattr(s, "period_type", "work") == "work"]
+
+    slot_dicts = [
+        {
+            "id": s.id,
+            "title": s.title,
+            "subject_id": s.subject_id or (s.profession_metadata or {}).get("subject_id"),
+            "class_name": s.subject.class_name if s.subject else (s.profession_metadata or {}).get("class"),
+            "semester": s.subject.semester if s.subject else (s.profession_metadata or {}).get("semester"),
+            "date_str": s.date_str,
+            "day_of_week": s.day_of_week,
+            "start_time": s.start_time,
+            "end_time": s.end_time,
+            "resource_id": s.resource_id,
+            "min_staff": s.min_staff or 1,
+            "target_staff": s.target_staff or 1,
+            "required_skills": s.required_skills or [],
+            "required_qualifications": s.required_qualifications or [],
+            "profession_metadata": s.profession_metadata or {},
+        }
+        for s in slots_to_solve
+    ]
+
+    people_dicts = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "skills": p.skills or [],
+            "inferred_skills": p.inferred_skills or [],
+            "qualifications": p.qualifications or [],
+            "preferences": p.preferences or {},
+            "profession_metadata": p.profession_metadata or {},
+            "max_hours_per_week": p.max_hours_per_week or 40.0,
+        }
+        for p in people
+    ]
+
+    leaves = db.query(LeaveRequest).filter(
+        LeaveRequest.org_id == req.org_id,
+        LeaveRequest.status.in_(["approved", "emergency_recorded"])
+    ).all()
+    leave_dicts = [
+        {
+            "person_id": l.person_id,
+            "start_date": l.start_date,
+            "end_date": l.end_date,
+            "start_time": l.start_time,
+            "end_time": l.end_time,
+        }
+        for l in leaves
+    ]
+
+    holidays = db.query(Holiday).filter(Holiday.org_id == req.org_id, Holiday.status == "active").all()
+    holiday_exceptions = db.query(HolidayException).filter(HolidayException.org_id == req.org_id).all()
+    holiday_dicts = [
+        {
+            "id": h.id,
+            "name": h.name,
+            "holiday_type": h.holiday_type,
+            "start_date": h.start_date,
+            "end_date": h.end_date or h.start_date,
+            "department_id": h.department_id,
+            "is_partial_day": h.is_partial_day,
+            "partial_start_time": h.partial_start_time,
+            "partial_end_time": h.partial_end_time,
+            "essential_staffing_allowed": h.essential_staffing_allowed,
+            "authorized_roles": h.authorized_roles or [],
+        }
+        for h in holidays
+    ]
+    exception_dicts = [
+        {
+            "holiday_id": e.holiday_id,
+            "person_id": e.person_id,
+            "slot_id": e.slot_id
+        }
+        for e in holiday_exceptions
+    ]
+
+    teacher_assign_dicts = [
+        {
+            "person_id": ta.person_id,
+            "subject_id": ta.subject_id,
+            "semester": ta.semester,
+            "class_name": ta.class_name,
+            "required_periods": getattr(ta, "required_periods", 4) or 4,
+            "allowed_working_days": getattr(ta, "allowed_working_days", [0, 1, 2, 3, 4]) or [0, 1, 2, 3, 4],
+            "preferred_periods": getattr(ta, "preferred_periods", []) or [],
+            "unavailable_periods": getattr(ta, "unavailable_periods", []) or [],
+            "max_periods_per_day": getattr(ta, "max_periods_per_day", 2) or 2,
+        }
+        for ta in teacher_assignments
+    ]
+
+    # Run GLIXON OR-Tools optimization engine
+    engine = SchedulingEngine()
+    solution = engine.solve(
+        slots=slot_dicts,
+        people=people_dicts,
+        leave_records=leave_dicts,
+        fairness_weight=req.fairness_weight,
+        preference_weight=req.preference_weight,
+        overtime_penalty_weight=req.overtime_penalty_weight,
+        holidays=holiday_dicts,
+        holiday_exceptions=exception_dicts,
+        teacher_assignments=teacher_assign_dicts
+    )
+
+    # Build entity lookups
+    people_map = {p.id: p for p in people}
+    slots_map = {s.id: s for s in all_slots}
+    dept_map = {d.id: d for d in departments}
+    res_map = {r.id: r for r in resources}
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+    # Enrich generated preview assignments
+    enriched_assignments = []
+    for a in solution["assignments"]:
+        slot = slots_map.get(a["slot_id"])
+        teacher = people_map.get(a["person_id"])
+        if not slot or not teacher:
+            continue
+
+        sub = slot.subject
+        sub_name = sub.name if sub else (slot.profession_metadata or {}).get("subject", slot.title)
+        sub_code = sub.code if sub else (slot.profession_metadata or {}).get("code", "")
+        sem_code = (slot.profession_metadata or {}).get("semester") or (sub.semester if sub else None)
+        c_name = (slot.profession_metadata or {}).get("class") or (sub.class_name if sub else None)
+        dept = dept_map.get(slot.department_id or teacher.department_id)
+        room = res_map.get(slot.resource_id)
+
+        dur_m = calculate_shift_duration_minutes(slot.start_time, slot.end_time)
+        dur_h = calculate_shift_duration_hours(slot.start_time, slot.end_time)
+
+        enriched_assignments.append({
+            "slot_id": slot.id,
+            "teacher_id": teacher.id,
+            "teacher_name": teacher.name,
+            "department_id": dept.id if dept else None,
+            "department_name": dept.name if dept else "General",
+            "semester": sem_code or "S1",
+            "subject_id": slot.subject_id,
+            "subject_name": sub_name,
+            "subject_code": sub_code,
+            "class_name": c_name or "General",
+            "day_of_week": slot.day_of_week,
+            "day_name": day_names[slot.day_of_week] if 0 <= slot.day_of_week < 7 else "Day",
+            "date_str": slot.date_str or a.get("date_str"),
+            "start_time": slot.start_time,
+            "end_time": slot.end_time,
+            "duration_minutes": dur_m,
+            "duration_hours": dur_h,
+            "resource_id": slot.resource_id,
+            "resource_name": room.name if room else "Classroom",
+            "title": slot.title
+        })
+
+    # Groupings for multi-perspective inspection
+    teacher_timetables: Dict[str, List[Dict[str, Any]]] = {}
+    class_timetables: Dict[str, List[Dict[str, Any]]] = {}
+    semester_timetables: Dict[str, List[Dict[str, Any]]] = {}
+    department_timetables: Dict[str, List[Dict[str, Any]]] = {}
+
+    for item in enriched_assignments:
+        teacher_timetables.setdefault(str(item["teacher_id"]), []).append(item)
+        class_timetables.setdefault(item["class_name"], []).append(item)
+        semester_timetables.setdefault(item["semester"], []).append(item)
+        department_timetables.setdefault(item["department_name"], []).append(item)
+
+    # Calculate workload analytics per teacher
+    teacher_workloads = {}
+    for p in people:
+        t_assigned = [item for item in enriched_assignments if item["teacher_id"] == p.id]
+        t_tas = [ta for ta in teacher_assignments if ta.person_id == p.id]
+        total_req_periods = sum(getattr(ta, "required_periods", 4) or 4 for ta in t_tas)
+        scheduled_periods = len(t_assigned)
+        weekly_hours = sum(item["duration_hours"] for item in t_assigned)
+        daily_hours = round(weekly_hours / 5.0, 1) if weekly_hours > 0 else 0.0
+
+        teacher_workloads[str(p.id)] = {
+            "teacher_id": p.id,
+            "teacher_name": p.name,
+            "daily_hours": daily_hours,
+            "weekly_hours": round(weekly_hours, 1),
+            "monthly_hours": round(weekly_hours * 4.0, 1),
+            "required_periods": total_req_periods,
+            "scheduled_periods": scheduled_periods,
+            "unassigned_periods": max(0, total_req_periods - scheduled_periods),
+            "assigned_semesters": list({item["semester"] for item in t_assigned}),
+            "assigned_subjects": list({item["subject_name"] for item in t_assigned}),
+            "free_periods": max(0, 20 - scheduled_periods),
+            "break_hours": 2.5
+        }
+
+    # If preview is False, directly persist to database
+    if not req.preview:
+        db.query(Assignment).filter(
+            Assignment.schedule_id == sched.id
+        ).delete(synchronize_session=False)
+
+        for a in enriched_assignments:
+            db_assign = Assignment(
+                schedule_id=sched.id,
+                slot_id=a["slot_id"],
+                person_id=a["teacher_id"],
+                original_person_id=a["teacher_id"],
+                date_str=a["date_str"],
+                start_time=a["start_time"],
+                end_time=a["end_time"],
+                is_replacement=False,
+                replacement_type="none",
+                status="assigned"
+            )
+            db.add(db_assign)
+
+        sched.fairness_score = solution.get("fairness_score", 95.0)
+        sched.version += 1
+        sched.total_assignments = len(enriched_assignments)
+        db.commit()
+
+        # Audit and notification
+        audit = AuditLog(
+            org_id=req.org_id,
+            action="GLIXON_TIMETABLE_GENERATED",
+            entity_type="schedule",
+            entity_id=str(sched.id),
+            details={"assignments": len(enriched_assignments), "fairness": sched.fairness_score}
+        )
+        db.add(audit)
+        db.commit()
+
+    return {
+        "success": True,
+        "preview": req.preview,
+        "schedule_id": sched.id,
+        "fairness_score": solution.get("fairness_score", 95.0),
+        "total_assignments": len(enriched_assignments),
+        "assignments": enriched_assignments,
+        "teacher_timetables": teacher_timetables,
+        "class_timetables": class_timetables,
+        "semester_timetables": semester_timetables,
+        "department_timetables": department_timetables,
+        "teacher_workloads": teacher_workloads,
+        "unfilled_slots": solution.get("unfilled_slots", []),
+        "conflicts": solution.get("conflicts", []),
+    }
+
+@router.post("/glixon-commit")
+def glixon_commit_schedule(req: GlixonCommitRequest, db: Session = Depends(get_db)):
+    """
+    Commits GLIXON generated preview assignments into the database.
+    Updates schedule version, audit history, and marks slots filled.
+    """
+    sched = None
+    if req.schedule_id:
+        sched = db.query(Schedule).filter(Schedule.id == req.schedule_id, Schedule.org_id == req.org_id).first()
+    if not sched:
+        sched = db.query(Schedule).filter(
+            Schedule.org_id == req.org_id,
+            Schedule.title == req.title
+        ).first()
+
+    if not sched:
+        sched = Schedule(
+            org_id=req.org_id,
+            title=req.title,
+            period_start=req.period_start,
+            period_end=req.period_end,
+            status="draft",
+            version=1
+        )
+        db.add(sched)
+        db.commit()
+        db.refresh(sched)
+
+    # Delete existing unpinned assignments
+    db.query(Assignment).filter(
+        Assignment.schedule_id == sched.id
+    ).delete(synchronize_session=False)
+
+    committed_count = 0
+    for a in req.assignments:
+        s_id = a.get("slot_id")
+        t_id = a.get("teacher_id") or a.get("person_id")
+        if not s_id or not t_id:
+            continue
+
+        slot = db.query(RequirementSlot).filter(RequirementSlot.id == s_id).first()
+        if not slot:
+            continue
+
+        # Sync slot subject and teacher metadata
+        if a.get("subject_id"):
+            slot.subject_id = a.get("subject_id")
+        meta = dict(slot.profession_metadata or {})
+        if a.get("subject_name"):
+            meta["subject"] = a.get("subject_name")
+        if a.get("semester"):
+            meta["semester"] = a.get("semester")
+        if a.get("class_name"):
+            meta["class"] = a.get("class_name")
+        slot.profession_metadata = meta
+
+        db_assign = Assignment(
+            schedule_id=sched.id,
+            slot_id=s_id,
+            person_id=t_id,
+            original_person_id=t_id,
+            date_str=a.get("date_str") or slot.date_str,
+            start_time=a.get("start_time") or slot.start_time,
+            end_time=a.get("end_time") or slot.end_time,
+            is_replacement=False,
+            replacement_type="none",
+            status="assigned"
+        )
+        db.add(db_assign)
+        committed_count += 1
+
+    sched.version += 1
+    sched.total_assignments = committed_count
+    db.commit()
+
+    # Create history snapshot
+    v_record = ScheduleVersion(
+        org_id=req.org_id,
+        schedule_id=sched.id,
+        version_number=sched.version,
+        snapshot_json={"total_assignments": committed_count, "committed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+        change_summary=f"GLIXON generated {committed_count} timetable assignments"
+    )
+    db.add(v_record)
+
+    audit = AuditLog(
+        org_id=req.org_id,
+        action="GLIXON_TIMETABLE_COMMITTED",
+        entity_type="schedule",
+        entity_id=str(sched.id),
+        details={"committed_assignments": committed_count, "version": sched.version}
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"GLIXON successfully saved {committed_count} assignments to the database.",
+        "schedule_id": sched.id,
+        "version": sched.version,
+        "total_assignments": committed_count
     }

@@ -93,8 +93,14 @@ class TeacherSubjectAssignment(Base):
     semester = Column(String(20), nullable=True)   # "S1", "S3", "S5"
     class_name = Column(String(50), nullable=True) # "S3 A", "S5 CSE-A"
     required_hours = Column(Float, default=4.0)
+    required_periods = Column(Integer, default=4)
+    allowed_working_days = Column(JSON, default=lambda: [0, 1, 2, 3, 4])
+    preferred_periods = Column(JSON, default=list)
+    unavailable_periods = Column(JSON, default=list)
+    max_periods_per_day = Column(Integer, default=2)
     eligible_rooms = Column(JSON, default=list)    # list of resource IDs
     is_primary = Column(Boolean, default=True)
+    assignment_status = Column(String(50), default="active")
     created_at = Column(DateTime, default=utc_now)
 
     organization = relationship("Organization", back_populates="teacher_subject_assignments")

@@ -133,8 +133,14 @@ class TeacherAssignmentBase(BaseModel):
     semester: Optional[str] = None          # "S3"
     class_name: Optional[str] = None        # "S3 A"
     required_hours: float = 4.0
+    required_periods: int = 4
+    allowed_working_days: List[int] = [0, 1, 2, 3, 4]
+    preferred_periods: List[str] = []
+    unavailable_periods: List[str] = []
+    max_periods_per_day: int = 2
     eligible_rooms: List[int] = []
     is_primary: bool = True
+    assignment_status: str = "active"
 
 class TeacherAssignmentCreate(TeacherAssignmentBase):
     org_id: Optional[int] = None
@@ -147,8 +153,14 @@ class TeacherAssignmentUpdate(BaseModel):
     semester: Optional[str] = None
     class_name: Optional[str] = None
     required_hours: Optional[float] = None
+    required_periods: Optional[int] = None
+    allowed_working_days: Optional[List[int]] = None
+    preferred_periods: Optional[List[str]] = None
+    unavailable_periods: Optional[List[str]] = None
+    max_periods_per_day: Optional[int] = None
     eligible_rooms: Optional[List[int]] = None
     is_primary: Optional[bool] = None
+    assignment_status: Optional[str] = None
 
 class TeacherAssignmentResponse(TeacherAssignmentBase):
     id: int
@@ -368,3 +380,46 @@ class HolidayExceptionCreate(BaseModel):
     slot_id: Optional[int] = None
     reason: str
     authorized_by: str = "Administrator"
+
+# Period Configuration
+class PeriodConfigItem(BaseModel):
+    name: str
+    type: str = "lecture"  # lecture, lab, break, lunch, tutorial, other, work
+    start_time: str
+    end_time: str
+    duration_minutes: Optional[int] = None
+    duration_hours: Optional[float] = None
+    is_active: bool = True
+    min_staff: int = 1
+    target_staff: int = 1
+    max_staff: int = 1
+
+class DayPeriodConfig(BaseModel):
+    day_name: str
+    is_working_day: bool = True
+    periods: List[PeriodConfigItem] = []
+
+class PeriodConfigPayload(BaseModel):
+    working_days_schedule: Dict[str, Any]
+
+# GLIXON Intelligent Timetable Generator
+class GlixonGenerateRequest(BaseModel):
+    org_id: int
+    schedule_id: Optional[int] = None
+    title: str = "GLIXON Optimized Timetable"
+    period_start: str
+    period_end: str
+    preview: bool = True
+    fairness_weight: float = 1.0
+    preference_weight: float = 1.0
+    overtime_penalty_weight: float = 1.0
+    selected_teacher_ids: Optional[List[int]] = None
+    selected_semesters: Optional[List[str]] = None
+
+class GlixonCommitRequest(BaseModel):
+    org_id: int
+    schedule_id: Optional[int] = None
+    title: str = "GLIXON Master Timetable"
+    period_start: str
+    period_end: str
+    assignments: List[Dict[str, Any]]

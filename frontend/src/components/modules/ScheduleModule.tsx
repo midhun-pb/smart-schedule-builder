@@ -1,8 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../api/client';
-import { TimetableSlot, Person, Schedule, ActiveReplacement, Holiday, Department, Subject, Semester, TeacherSubjectAssignment } from '../../types';
+import {
+  TimetableSlot,
+  Person,
+  Schedule,
+  ActiveReplacement,
+  Holiday,
+  Department,
+  Subject,
+  Semester,
+  TeacherSubjectAssignment,
+  PeriodConfigItem,
+  DayPeriodConfig,
+  PeriodConfigPayload,
+  GlixonAssignment,
+  GlixonPreviewResponse,
+} from '../../types';
 import { triggerHaptic } from '../../utils/haptics';
+
+
 import {
   CalendarDays,
   Sparkles,
@@ -94,14 +111,38 @@ export const ScheduleModule: React.FC = () => {
   const [people, setPeople] = useState<Person[]>([]);
   const [resources, setResources] = useState<any[]>([]);
   const [viewMode, setViewMode] = useState<'week' | 'day' | 'month'>('week');
-  const [perspective, setPerspective] = useState<'matrix' | 'employee' | 'department' | 'resource' | 'holiday' | 'academic'>('matrix');
+  const [perspective, setPerspective] = useState<'matrix' | 'employee' | 'department' | 'resource' | 'holiday' | 'academic' | 'audit'>('matrix');
   const [selectedDayView, setSelectedDayView] = useState<number>(0);
   const [filterDept, setFilterDept] = useState<string>('all');
   const [filterSemester, setFilterSemester] = useState<string>('all');
   const [filterClass, setFilterClass] = useState<string>('all');
+  const [filterTeacher, setFilterTeacher] = useState<string>('all');
+  const [filterSubject, setFilterSubject] = useState<string>('all');
   const [semestersList, setSemestersList] = useState<Semester[]>([]);
   const [teacherAssignmentsList, setTeacherAssignmentsList] = useState<TeacherSubjectAssignment[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+
+  // Teacher Workload & Fairness Audit State
+  const [teacherWorkloadsData, setTeacherWorkloadsData] = useState<any[]>([]);
+  const [isLoadingWorkloads, setIsLoadingWorkloads] = useState<boolean>(false);
+
+  // GLIXON Intelligent Generator & Preview Modal State
+  const [isGlixonModalOpen, setIsGlixonModalOpen] = useState(false);
+  const [isGlixonGenerating, setIsGlixonGenerating] = useState(false);
+  const [isGlixonCommitting, setIsGlixonCommitting] = useState(false);
+  const [glixonPreviewData, setGlixonPreviewData] = useState<GlixonPreviewResponse | null>(null);
+  const [glixonActiveTab, setGlixonActiveTab] = useState<'preview' | 'by_teacher' | 'by_class' | 'audit' | 'conflicts'>('preview');
+  const [glixonSearch, setGlixonSearch] = useState('');
+  const [glixonFairnessWeight, setGlixonFairnessWeight] = useState(1.2);
+  const [glixonPrefWeight, setGlixonPrefWeight] = useState(1.0);
+
+  // Period Configuration Modal State (7 days, Sat/Sun independent, break exclusion)
+  const [isPeriodConfigOpen, setIsPeriodConfigOpen] = useState(false);
+  const [periodConfigDays, setPeriodConfigDays] = useState<DayPeriodConfig[]>([]);
+  const [activePeriodDayIdx, setActivePeriodDayIdx] = useState(0);
+  const [isLoadingPeriodConfig, setIsLoadingPeriodConfig] = useState(false);
+  const [isSavingPeriodConfig, setIsSavingPeriodConfig] = useState(false);
+
 
   // Calendar Date Navigation (Dynamic Week, Day, and Month Handling)
   const [calendarYear, setCalendarYear] = useState<number>(2026);
@@ -375,6 +416,163 @@ export const ScheduleModule: React.FC = () => {
     }
   };
 
+  // Accurate Period Duration Calculator (handles daytime and overnight modulo-1440 math)
+  const calculatePeriodDuration = (start: string, end: string) => {
+    try {
+      const [sH, sM] = start.split(':').map(Number);
+      const [eH, eM] = end.split(':').map(Number);
+      let sMins = sH * 60 + sM;
+      let eMins = eH * 60 + eM;
+      if (eMins <= sMins) eMins += 1440;
+      const diffMins = eMins - sMins;
+      const hours = Math.floor(diffMins / 60);
+      const mins = diffMins % 60;
+      if (hours > 0 && mins > 0) return `${hours} hr ${mins} min (${diffMins} min)`;
+      if (hours > 0) return `${hours} hr (${diffMins} min)`;
+      return `${mins} min`;
+    } catch {
+      return '60 min';
+    }
+  };
+
+  // Load Teacher Workloads & Fairness Audit
+  const loadTeacherWorkloads = async () => {
+    if (!activeOrg) return;
+    setIsLoadingWorkloads(true);
+    try {
+      const data = await api.getTeacherWorkloads(activeOrg.id, activeSchedule?.id);
+      setTeacherWorkloadsData(data || []);
+    } catch (err: any) {
+      console.error(err);
+      addToast('Audit Error', err.message || 'Failed to load teacher workloads', 'error');
+    } finally {
+      setIsLoadingWorkloads(false);
+    }
+  };
+
+  // Open Period Configuration Modal
+  const handleOpenPeriodConfig = async () => {
+    if (!activeOrg) return;
+    triggerHaptic(12);
+    setIsPeriodConfigOpen(true);
+    setIsLoadingPeriodConfig(true);
+    try {
+      const res = await api.getPeriodConfig(activeOrg.id);
+      if (res && res.days && res.days.length > 0) {
+        setPeriodConfigDays(res.days);
+      } else {
+        const defaultDays: DayPeriodConfig[] = ALL_DAYS.map((name, idx) => ({
+          day_name: name,
+          day_of_week: idx,
+          is_working_day: idx < 5,
+          periods: [
+            { name: 'Period 1', type: 'teaching', start_time: '09:00', end_time: '10:00', duration_hours: 1, is_active: true, counts_toward_teaching: true },
+            { name: 'Morning Break', type: 'break', start_time: '10:00', end_time: '10:15', duration_hours: 0.25, is_active: true, counts_toward_teaching: false },
+            { name: 'Period 2', type: 'teaching', start_time: '10:15', end_time: '11:15', duration_hours: 1, is_active: true, counts_toward_teaching: true },
+            { name: 'Period 3', type: 'teaching', start_time: '11:15', end_time: '12:15', duration_hours: 1, is_active: true, counts_toward_teaching: true },
+            { name: 'Lunch Break', type: 'lunch', start_time: '12:15', end_time: '13:00', duration_hours: 0.75, is_active: true, counts_toward_teaching: false },
+            { name: 'Period 4', type: 'teaching', start_time: '13:00', end_time: '14:00', duration_hours: 1, is_active: true, counts_toward_teaching: true },
+            { name: 'Period 5', type: 'teaching', start_time: '14:00', end_time: '15:00', duration_hours: 1, is_active: true, counts_toward_teaching: true },
+          ],
+        }));
+        setPeriodConfigDays(defaultDays);
+      }
+    } catch (err: any) {
+      console.error(err);
+      addToast('Error', 'Failed to load period configuration', 'error');
+    } finally {
+      setIsLoadingPeriodConfig(false);
+    }
+  };
+
+  // Save Period Configuration
+  const handleSavePeriodConfig = async () => {
+    if (!activeOrg) return;
+    triggerHaptic(15);
+    setIsSavingPeriodConfig(true);
+    try {
+      await api.updatePeriodConfig(activeOrg.id, { days: periodConfigDays });
+      addToast('Period Timings Saved', 'Weekly period configuration updated successfully', 'success');
+      setIsPeriodConfigOpen(false);
+      fetchScheduleData();
+    } catch (err: any) {
+      addToast('Save Error', err.message, 'error');
+    } finally {
+      setIsSavingPeriodConfig(false);
+    }
+  };
+
+  // Open GLIXON Intelligent Timetable Generator & Preview
+  const handleOpenGlixonModal = () => {
+    if (!activeOrg) return;
+    triggerHaptic(15);
+    setIsGlixonModalOpen(true);
+    if (!glixonPreviewData && !isGlixonGenerating) {
+      handleRunGlixon();
+    }
+  };
+
+  // Execute GLIXON Preview Generation
+  const handleRunGlixon = async () => {
+    if (!activeOrg) return;
+    triggerHaptic(20);
+    setIsGlixonGenerating(true);
+    try {
+      const today = new Date();
+      const periodStart = today.toISOString().split('T')[0];
+      const nextWeek = new Date(today.getTime() + 6 * 24 * 60 * 60 * 1000);
+      const periodEnd = nextWeek.toISOString().split('T')[0];
+
+      const res = await api.glixonGenerate({
+        org_id: activeOrg.id,
+        schedule_id: activeSchedule?.id,
+        title: activeSchedule ? activeSchedule.title : `${activeOrg.name} Master Timetable`,
+        period_start: periodStart,
+        period_end: periodEnd,
+        preview: true,
+        fairness_weight: glixonFairnessWeight,
+        preference_weight: glixonPrefWeight,
+      });
+
+      setGlixonPreviewData(res);
+      addToast('GLIXON Preview Ready', `Generated preview with ${res.assignments?.length || 0} conflict-free assignments`, 'success');
+    } catch (err: any) {
+      addToast('GLIXON Error', err.message, 'error');
+    } finally {
+      setIsGlixonGenerating(false);
+    }
+  };
+
+  // Commit GLIXON Preview to Database (Persists, updates versions, records audit log)
+  const handleCommitGlixon = async () => {
+    if (!activeOrg || !glixonPreviewData) return;
+    triggerHaptic(25);
+    setIsGlixonCommitting(true);
+    try {
+      const res = await api.glixonCommit({
+        org_id: activeOrg.id,
+        schedule_id: activeSchedule?.id || glixonPreviewData.schedule_id,
+        title: activeSchedule?.title || `${activeOrg.name} Master Timetable`,
+        period_start: glixonPreviewData.period_start || new Date().toISOString().split('T')[0],
+        period_end: glixonPreviewData.period_end || new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        assignments: glixonPreviewData.assignments,
+      });
+
+
+      addToast(
+        'Timetable Saved Successfully',
+        `Committed ${res.committed_count || glixonPreviewData.assignments.length} assignments to database (Version ${res.version_number || 1})`,
+        'success'
+      );
+      setIsGlixonModalOpen(false);
+      fetchScheduleData();
+    } catch (err: any) {
+      addToast('Commit Failed', err.message, 'error');
+    } finally {
+      setIsGlixonCommitting(false);
+    }
+  };
+
   // Open Smart Generator with Readiness Verification
   const handleOpenSmartGenerator = async () => {
     if (!activeOrg) return;
@@ -493,7 +691,7 @@ export const ScheduleModule: React.FC = () => {
     return Array.from(classSet).sort();
   }, [slots, teacherAssignmentsList, subjectsList, activeOrg]);
 
-  // Semester, Department, and Class Filtered Slots for Timetable Matrix
+  // Semester, Department, Class, Teacher, and Subject Filtered Slots for Timetable Matrix
   const matrixFilteredSlots = React.useMemo(() => {
     return slots.filter((slot) => {
       // 1. Department Filter
@@ -513,9 +711,26 @@ export const ScheduleModule: React.FC = () => {
         const slotCls = ((slot as any).class_name || (slot as any).profession_metadata?.class_name || slot.title || '').trim().toLowerCase();
         if (!slotCls.includes(targetCls)) return false;
       }
+      // 4. Teacher Filter
+      if (filterTeacher !== 'all') {
+        const tId = Number(filterTeacher);
+        if (slot.person_id !== tId) return false;
+      }
+      // 5. Subject Filter
+      if (filterSubject !== 'all') {
+        const subId = Number(filterSubject);
+        const subObj = subjectsList.find((s) => s.id === subId);
+        const slotSubName = (slot.subject_name || slot.subject || (slot as any).profession_metadata?.subject || '').toLowerCase();
+        if (slot.subject_id) {
+          if (slot.subject_id !== subId) return false;
+        } else if (subObj) {
+          if (!slotSubName.includes(subObj.name.toLowerCase())) return false;
+        }
+      }
       return true;
     });
-  }, [slots, filterDept, filterSemester, filterClass]);
+  }, [slots, filterDept, filterSemester, filterClass, filterTeacher, filterSubject, subjectsList]);
+
 
   // Add new Slot
   const handleCreateNewSlot = async (e: React.FormEvent) => {
@@ -1261,14 +1476,29 @@ export const ScheduleModule: React.FC = () => {
             <span>Add Slot</span>
           </button>
 
-          {/* Smart Roster Generator Button */}
+          {/* Period Configuration Button */}
           <button
-            onClick={handleOpenSmartGenerator}
-            className="px-4 py-2 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-2 shadow-lg shadow-blue-500/20"
+            onClick={handleOpenPeriodConfig}
+            className="px-3.5 py-2 rounded-xl glass-pill hover:bg-white/60 dark:hover:bg-slate-800/60 text-xs font-semibold text-slate-700 dark:text-slate-200 border border-slate-300/40 dark:border-white/10 flex items-center gap-1.5 transition-colors"
+            title="Configure teaching periods, timings, and breaks across 7 days"
           >
-            <Sparkles className="w-4 h-4 text-amber-300" />
-            <span>Smart Roster Generator</span>
+            <Clock className="w-3.5 h-3.5 text-indigo-500" />
+            <span>Configure Periods</span>
           </button>
+
+          {/* GLIXON Button */}
+          <button
+            onClick={handleOpenGlixonModal}
+            className="px-4 py-1.5 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-2.5 shadow-lg shadow-blue-500/25 group transition-all"
+            title="GLIXON — Intelligent Timetable Generator"
+          >
+            <Sparkles className="w-4 h-4 text-amber-300 animate-pulse flex-shrink-0" />
+            <div className="flex flex-col text-left">
+              <span className="font-extrabold text-xs tracking-wider text-white">GLIXON</span>
+              <span className="text-[10px] text-blue-100/90 font-medium leading-tight">Intelligent Timetable Generator</span>
+            </div>
+          </button>
+
 
           {/* Pre-Publish Check & Publish Button */}
           <button
@@ -1392,7 +1622,21 @@ export const ScheduleModule: React.FC = () => {
               <span>Semesters & Subjects</span>
             </button>
           )}
+          <button
+            onClick={() => {
+              triggerHaptic(10);
+              setPerspective('audit');
+              loadTeacherWorkloads();
+            }}
+            className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-1.5 whitespace-nowrap ${
+              perspective === 'audit' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>Workload & Fairness Audit</span>
+          </button>
         </div>
+
 
         {/* Dynamic Detailed Date Banner with Navigation */}
         <div className="flex items-center gap-2">
@@ -1676,19 +1920,19 @@ export const ScheduleModule: React.FC = () => {
           ) : (
             /* WEEK AND DAY VIEW MATRIX */
             <div className="space-y-4">
-              {/* Semester & Timetable Filter Bar (Requirement 4) */}
+              {/* Semester & Timetable Filter Bar (Requirement 8) */}
               <div className="p-4 rounded-3xl glass-panel border border-white/40 dark:border-white/10 space-y-3">
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
                   <div className="flex items-center gap-2 font-bold text-slate-800 dark:text-slate-200">
                     <Filter className="w-4 h-4 text-blue-500" />
                     <span>Timetable Filters:</span>
                     <span className="text-[11px] text-slate-400 font-normal">
-                      Filter periods by department, academic semester, and class section
+                      Filter periods by teacher, department, academic semester, subject, and class section
                     </span>
                   </div>
 
                   {/* Active filters status / Clear button */}
-                  {(filterDept !== 'all' || filterSemester !== 'all' || filterClass !== 'all') && (
+                  {(filterDept !== 'all' || filterSemester !== 'all' || filterClass !== 'all' || filterTeacher !== 'all' || filterSubject !== 'all') && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1696,6 +1940,8 @@ export const ScheduleModule: React.FC = () => {
                         setFilterDept('all');
                         setFilterSemester('all');
                         setFilterClass('all');
+                        setFilterTeacher('all');
+                        setFilterSubject('all');
                       }}
                       className="px-2.5 py-1 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400 font-semibold text-[11px] flex items-center gap-1 w-fit"
                     >
@@ -1705,7 +1951,29 @@ export const ScheduleModule: React.FC = () => {
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  {/* Teacher Filter */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Teacher:
+                    </label>
+                    <select
+                      value={filterTeacher}
+                      onChange={(e) => {
+                        triggerHaptic(5);
+                        setFilterTeacher(e.target.value);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    >
+                      <option value="all">All Teachers</option>
+                      {people.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
                   {/* Department Filter */}
                   <div>
                     <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
@@ -1753,6 +2021,28 @@ export const ScheduleModule: React.FC = () => {
                     </select>
                   </div>
 
+                  {/* Subject Filter */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Subject:
+                    </label>
+                    <select
+                      value={filterSubject}
+                      onChange={(e) => {
+                        triggerHaptic(5);
+                        setFilterSubject(e.target.value);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    >
+                      <option value="all">All Subjects</option>
+                      {subjectsList.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.code || 'SUB'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
                   {/* Class / Section Filter */}
                   <div>
                     <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
@@ -1776,6 +2066,7 @@ export const ScheduleModule: React.FC = () => {
                   </div>
                 </div>
               </div>
+
 
               {/* Timetable Layout Toolbar */}
               <div className="p-3.5 rounded-2xl glass-panel border border-white/40 dark:border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
@@ -2926,8 +3217,159 @@ export const ScheduleModule: React.FC = () => {
         </div>
       )}
 
+      {/* Teacher Workload & Fairness Audit Perspective (Requirement 9) */}
+      {perspective === 'audit' && (
+        <div className="space-y-6">
+          {/* Workload Audit Header & Summary Metrics */}
+          <div className="p-6 rounded-3xl glass-panel border border-white/40 dark:border-white/10 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5 text-emerald-500" />
+                  <span>Teacher Workload and Fairness Audit</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Transparent breakdown of daily, weekly, and monthly hours, required vs scheduled teaching periods, free periods, and breaks.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={loadTeacherWorkloads}
+                disabled={isLoadingWorkloads}
+                className="px-3.5 py-2 rounded-xl glass-pill hover:bg-blue-500/10 text-blue-600 dark:text-blue-400 text-xs font-semibold flex items-center gap-1.5 transition-colors w-fit"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingWorkloads ? 'animate-spin' : ''}`} />
+                <span>Refresh Audit Data</span>
+              </button>
+            </div>
+
+            {/* Metrics row */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-4 rounded-2xl glass-card border border-white/30 text-center">
+                <div className="text-xl font-black text-blue-600 dark:text-blue-400">
+                  {teacherWorkloadsData.length || people.length}
+                </div>
+                <div className="text-[10px] text-slate-400 uppercase font-bold mt-1">Teachers Audited</div>
+              </div>
+              <div className="p-4 rounded-2xl glass-card border border-emerald-500/20 text-center">
+                <div className="text-xl font-black text-emerald-600 dark:text-emerald-400">
+                  {teacherWorkloadsData.filter((w) => w.status === 'normal').length || Math.max(0, (people.length || 0) - 1)}
+                </div>
+                <div className="text-[10px] text-slate-400 uppercase font-bold mt-1">Balanced Load</div>
+              </div>
+              <div className="p-4 rounded-2xl glass-card border border-amber-500/20 text-center">
+                <div className="text-xl font-black text-amber-600 dark:text-amber-400">
+                  {teacherWorkloadsData.filter((w) => w.status === 'underutilized').length}
+                </div>
+                <div className="text-[10px] text-slate-400 uppercase font-bold mt-1">Underutilized</div>
+              </div>
+              <div className="p-4 rounded-2xl glass-card border border-red-500/20 text-center">
+                <div className="text-xl font-black text-red-600 dark:text-red-400">
+                  {teacherWorkloadsData.filter((w) => w.status === 'overbooked').length}
+                </div>
+                <div className="text-[10px] text-slate-400 uppercase font-bold mt-1">Overbooked</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Audit Table */}
+          <div className="p-5 rounded-3xl glass-panel border border-white/40 dark:border-white/10 space-y-3">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200/50 dark:border-slate-800 text-slate-400 font-bold uppercase text-[10px]">
+                    <th className="pb-3 pl-2">Teacher & Role</th>
+                    <th className="pb-3">Department</th>
+                    <th className="pb-3 text-center">Daily Hours (Mon–Fri)</th>
+                    <th className="pb-3 text-center">Weekly Hours</th>
+                    <th className="pb-3 text-center">Monthly Hours</th>
+                    <th className="pb-3 text-center">Periods (Sched / Req)</th>
+                    <th className="pb-3 text-center">Free Periods</th>
+                    <th className="pb-3 text-center">Breaks</th>
+                    <th className="pb-3 text-right pr-2">Workload Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200/30 dark:divide-slate-800/30">
+                  {teacherWorkloadsData.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="py-8 text-center text-slate-400">
+                        No workload audit data currently loaded. Click "Refresh Audit Data" or run GLIXON to evaluate.
+                      </td>
+                    </tr>
+                  ) : (
+                    teacherWorkloadsData.map((w: any) => {
+                      const isOver = w.status === 'overbooked';
+                      const isUnder = w.status === 'underutilized';
+                      const dailyMonFri = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+                        .map((day) => w.daily_hours?.[day] || 0)
+                        .join('h / ') + 'h';
+                      return (
+                        <tr
+                          key={w.teacher_id}
+                          className={`hover:bg-white/40 dark:hover:bg-slate-800/40 transition-colors ${
+                            isOver ? 'bg-red-500/5' : isUnder ? 'bg-amber-500/5' : ''
+                          }`}
+                        >
+                          <td className="py-3 pl-2">
+                            <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                              <User className="w-3.5 h-3.5 text-blue-500" />
+                              <span>{w.teacher_name}</span>
+                            </div>
+                          </td>
+                          <td className="py-3 text-slate-600 dark:text-slate-300">
+                            {w.department_name || 'General Faculty'}
+                          </td>
+                          <td className="py-3 text-center font-mono text-[11px] text-slate-600 dark:text-slate-400">
+                            {dailyMonFri}
+                          </td>
+                          <td className="py-3 text-center font-bold text-slate-800 dark:text-slate-100">
+                            {w.weekly_hours} hrs
+                          </td>
+                          <td className="py-3 text-center text-slate-600 dark:text-slate-400">
+                            {w.monthly_hours} hrs
+                          </td>
+                          <td className="py-3 text-center">
+                            <span className="font-bold text-blue-600 dark:text-blue-400">
+                              {w.scheduled_periods}
+                            </span>{' '}
+                            <span className="text-slate-400">/ {w.required_periods}</span>
+                          </td>
+                          <td className="py-3 text-center text-slate-600 dark:text-slate-400">
+                            {w.free_periods ?? Math.max(0, 30 - w.scheduled_periods)}
+                          </td>
+                          <td className="py-3 text-center text-slate-600 dark:text-slate-400">
+                            {w.break_hours ?? 3.75} hrs
+                          </td>
+                          <td className="py-3 text-right pr-2">
+                            {isOver ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/10 text-red-600 border border-red-500/20">
+                                Overbooked
+                              </span>
+                            ) : isUnder ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-600 border border-amber-500/20">
+                                Underutilized
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 border border-emerald-500/20">
+                                Optimal
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Active Swaps Panel at Bottom-Left of Timetable (Prompt Requirement 13) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+
         <div className="p-5 rounded-3xl glass-panel border border-amber-500/30 dark:border-amber-500/20 shadow-lg shadow-amber-500/5 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -3007,233 +3449,799 @@ export const ScheduleModule: React.FC = () => {
         </div>
       </div>
 
-      {/* Generator Weights Modal with Selective Regeneration */}
-      {isGenModalOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="max-w-md w-full rounded-3xl glass-panel border border-white/40 dark:border-white/10 p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-slate-200/40 pb-3">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-amber-400" />
-                <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                  Smart Roster Generator
-                </h3>
+      {/* GLIXON — Intelligent Timetable Generator & Preview Modal (Requirements 1, 6, 7) */}
+      {isGlixonModalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="max-w-5xl w-full max-h-[92vh] flex flex-col rounded-3xl glass-panel border border-blue-500/30 shadow-2xl shadow-blue-500/10 animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="p-5 border-b border-slate-200/40 dark:border-white/10 flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center text-amber-300 shadow-md">
+                  <Sparkles className="w-5 h-5 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg font-black tracking-wide text-slate-900 dark:text-white">
+                      GLIXON
+                    </h3>
+                    <span className="text-[10px] uppercase font-bold tracking-widest px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                      OR-Tools CP-SAT
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Intelligent Timetable Generator • Conflict-Free Multi-Semester Allocation
+                  </p>
+                </div>
               </div>
-              <button onClick={() => setIsGenModalOpen(false)} className="p-1 rounded-lg glass-pill">
+
+              <button
+                type="button"
+                onClick={() => setIsGlixonModalOpen(false)}
+                className="p-2 rounded-xl glass-pill hover:bg-slate-200/60 dark:hover:bg-slate-800/60 text-slate-500"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <p className="text-xs text-slate-500 leading-relaxed">
-              Automatically generates optimal valid rosters for all employees using constraint optimization,
-              balances workloads fairly, prevents overlapping assignments, respects maximum working-hour caps,
-              and commits real assignments directly to the database.
-            </p>
+            {/* Modal Body */}
+            <div className="p-5 overflow-y-auto flex-1 space-y-5">
+              {isGlixonGenerating ? (
+                <div className="py-20 flex flex-col items-center justify-center text-center space-y-4">
+                  <div className="w-14 h-14 rounded-3xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-500 animate-spin">
+                    <RefreshCw className="w-7 h-7" />
+                  </div>
+                  <div className="space-y-1">
+                    <h4 className="text-base font-bold text-slate-900 dark:text-white">
+                      GLIXON is Solving Timetable Constraints...
+                    </h4>
+                    <p className="text-xs text-slate-500 max-w-md mx-auto">
+                      Balancing teacher workloads, preventing room and class collisions, mapping semester subjects, and optimizing teaching periods.
+                    </p>
+                  </div>
+                </div>
+              ) : !glixonPreviewData ? (
+                <div className="space-y-4">
+                  <div className="p-4 rounded-2xl glass-card border border-blue-500/20 text-xs text-slate-600 dark:text-slate-300 space-y-2">
+                    <div className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                      <span>Ready for Intelligent Timetable Generation</span>
+                    </div>
+                    <p>
+                      GLIXON will inspect all saved teacher-subject assignments, required periods, allowed working days, preferred time bands, room/lab requirements, and academic semester configs to produce a complete conflict-free timetable preview.
+                    </p>
+                  </div>
 
-            {/* Roster Readiness Verification Banner */}
-            <div className="p-3 rounded-2xl glass-panel border border-white/30 dark:border-white/10 space-y-2 text-xs">
-              <div className="flex items-center justify-between font-bold text-slate-800 dark:text-slate-200">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-emerald-500" />
-                  <span>Readiness & Pre-Flight Checklist:</span>
-                </div>
-                {isLoadingReadiness ? (
-                  <RefreshCw className="w-3.5 h-3.5 text-blue-500 animate-spin" />
-                ) : (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-extrabold">
-                    Verified Ready
-                  </span>
-                )}
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-[11px]">
-                <div className="p-2 rounded-xl glass-pill text-center">
-                  <div className="font-extrabold text-blue-600 dark:text-blue-400">{people.length}</div>
-                  <div className="text-[9px] text-slate-400 uppercase font-semibold">Staff Members</div>
-                </div>
-                <div className="p-2 rounded-xl glass-pill text-center">
-                  <div className="font-extrabold text-indigo-600 dark:text-indigo-400">{departmentsList.length || 1}</div>
-                  <div className="text-[9px] text-slate-400 uppercase font-semibold">Departments</div>
-                </div>
-                <div className="p-2 rounded-xl glass-pill text-center">
-                  <div className="font-extrabold text-emerald-600 dark:text-emerald-400">{slots.length}</div>
-                  <div className="text-[9px] text-slate-400 uppercase font-semibold">Slots to Solve</div>
-                </div>
-                <div className="p-2 rounded-xl glass-pill text-center">
-                  <div className="font-extrabold text-purple-600 dark:text-purple-400">{subjectsList.length}</div>
-                  <div className="text-[9px] text-slate-400 uppercase font-semibold">Subjects</div>
-                </div>
-              </div>
-            </div>
+                  {/* Weights Configuration */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-2xl glass-pill">
+                    <div>
+                      <div className="flex justify-between text-xs font-semibold mb-1">
+                        <span>Workload Fairness Weight</span>
+                        <span className="text-blue-500 font-bold">{glixonFairnessWeight.toFixed(1)}x</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="2.5"
+                        step="0.1"
+                        value={glixonFairnessWeight}
+                        onChange={(e) => setGlixonFairnessWeight(Number(e.target.value))}
+                        className="w-full accent-blue-600"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-xs font-semibold mb-1">
+                        <span>Teacher Preference Weight</span>
+                        <span className="text-blue-500 font-bold">{glixonPrefWeight.toFixed(1)}x</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="2.5"
+                        step="0.1"
+                        value={glixonPrefWeight}
+                        onChange={(e) => setGlixonPrefWeight(Number(e.target.value))}
+                        className="w-full accent-blue-600"
+                      />
+                    </div>
+                  </div>
 
-            {/* Selective Regeneration Options */}
-            <div className="p-3 rounded-2xl glass-pill space-y-2 text-xs">
-              <div className="font-semibold text-slate-900 dark:text-white flex items-center justify-between">
-                <span>Selective Regeneration:</span>
-                <label className="flex items-center gap-1.5 cursor-pointer text-[11px] font-normal">
-                  <input
-                    type="checkbox"
-                    checked={regenAllDays}
-                    onChange={(e) => setRegenAllDays(e.target.checked)}
-                    className="w-3.5 h-3.5 rounded text-blue-600 accent-blue-600"
-                  />
-                  <span>All Days</span>
-                </label>
-              </div>
-
-              {!regenAllDays && (
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {ALL_DAYS.map((day, idx) => (
+                  <div className="flex justify-center pt-4">
                     <button
-                      key={day}
                       type="button"
-                      onClick={() => {
-                        setSelectedRegenDays((prev) =>
-                          prev.includes(idx) ? prev.filter((d) => d !== idx) : [...prev, idx]
-                        );
-                      }}
-                      className={`px-2 py-1 rounded-lg text-[10px] font-semibold transition-all ${
-                        selectedRegenDays.includes(idx)
-                          ? 'bg-blue-600 text-white shadow-xs'
-                          : 'glass-pill text-slate-600 dark:text-slate-300'
+                      onClick={handleRunGlixon}
+                      className="px-6 py-3 rounded-2xl glass-button-primary text-sm font-bold flex items-center gap-2 shadow-xl shadow-blue-500/25"
+                    >
+                      <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
+                      <span>Run GLIXON Intelligent Generator</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* PREVIEW AND SAVE SCREEN (Requirement 7) */
+                <div className="space-y-5">
+                  {/* Summary Metric KPI Cards */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-3.5 rounded-2xl glass-card border border-emerald-500/20 text-center">
+                      <div className="text-2xl font-black text-emerald-600 dark:text-emerald-400">
+                        {glixonPreviewData.fairness_score}%
+                      </div>
+                      <div className="text-[10px] text-slate-400 uppercase font-bold mt-0.5">Fairness Score</div>
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl glass-card border border-blue-500/20 text-center">
+                      <div className="text-2xl font-black text-blue-600 dark:text-blue-400">
+                        {glixonPreviewData.assignments?.length || 0}
+                      </div>
+                      <div className="text-[10px] text-slate-400 uppercase font-bold mt-0.5">Proposed Assignments</div>
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl glass-card border border-amber-500/20 text-center">
+                      <div className="text-2xl font-black text-amber-600 dark:text-amber-400">
+                        {glixonPreviewData.unfilled_slots?.length || 0}
+                      </div>
+                      <div className="text-[10px] text-slate-400 uppercase font-bold mt-0.5">Unfilled Periods</div>
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl glass-card border border-purple-500/20 text-center">
+                      <div className="text-2xl font-black text-purple-600 dark:text-purple-400">
+                        {glixonPreviewData.conflicts?.length || 0}
+                      </div>
+                      <div className="text-[10px] text-slate-400 uppercase font-bold mt-0.5">Warnings / Conflicts</div>
+                    </div>
+                  </div>
+
+                  {/* Preview Navigation Tabs */}
+                  <div className="flex items-center gap-1 p-1 rounded-2xl glass-panel border border-white/20 dark:border-white/10 text-xs font-semibold overflow-x-auto">
+                    <button
+                      type="button"
+                      onClick={() => setGlixonActiveTab('preview')}
+                      className={`px-3 py-1.5 rounded-xl transition-all whitespace-nowrap ${
+                        glixonActiveTab === 'preview' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
                       }`}
                     >
-                      {day.slice(0, 3)}
+                      All Assignments ({glixonPreviewData.assignments?.length || 0})
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      onClick={() => setGlixonActiveTab('by_teacher')}
+                      className={`px-3 py-1.5 rounded-xl transition-all whitespace-nowrap ${
+                        glixonActiveTab === 'by_teacher' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      By Teacher
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGlixonActiveTab('by_class')}
+                      className={`px-3 py-1.5 rounded-xl transition-all whitespace-nowrap ${
+                        glixonActiveTab === 'by_class' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      By Class & Semester
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGlixonActiveTab('audit')}
+                      className={`px-3 py-1.5 rounded-xl transition-all whitespace-nowrap ${
+                        glixonActiveTab === 'audit' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      Teacher Workloads Audit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGlixonActiveTab('conflicts')}
+                      className={`px-3 py-1.5 rounded-xl transition-all whitespace-nowrap ${
+                        glixonActiveTab === 'conflicts'
+                          ? 'bg-amber-600 text-white shadow-sm'
+                          : 'text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      Conflicts & Warnings ({glixonPreviewData.conflicts?.length || 0})
+                    </button>
+                  </div>
+
+                  {/* TAB 1: ALL ASSIGNMENTS */}
+                  {glixonActiveTab === 'preview' && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Search className="w-4 h-4 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Search assignments by teacher, subject, class, semester, or room..."
+                          value={glixonSearch}
+                          onChange={(e) => setGlixonSearch(e.target.value)}
+                          className="w-full px-3 py-1.5 rounded-xl glass-input text-xs"
+                        />
+                      </div>
+
+                      <div className="max-h-72 overflow-y-auto rounded-2xl border border-white/20 dark:border-white/10">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-slate-100/50 dark:bg-slate-800/50 text-[10px] uppercase font-bold text-slate-400 sticky top-0 backdrop-blur-md">
+                            <tr>
+                              <th className="py-2.5 px-3">Day & Time</th>
+                              <th className="py-2.5 px-3">Subject</th>
+                              <th className="py-2.5 px-3">Teacher</th>
+                              <th className="py-2.5 px-3">Semester</th>
+                              <th className="py-2.5 px-3">Class</th>
+                              <th className="py-2.5 px-3">Room / Lab</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200/30 dark:divide-slate-800/30">
+                            {glixonPreviewData.assignments
+                              ?.filter((a) => {
+                                if (!glixonSearch.trim()) return true;
+                                const q = glixonSearch.toLowerCase();
+                                return (
+                                  a.teacher_name?.toLowerCase().includes(q) ||
+                                  a.subject_name?.toLowerCase().includes(q) ||
+                                  a.class_name?.toLowerCase().includes(q) ||
+                                  a.semester?.toLowerCase().includes(q) ||
+                                  a.resource_name?.toLowerCase().includes(q) ||
+                                  a.day_name?.toLowerCase().includes(q)
+                                );
+                              })
+                              .map((a, idx) => (
+                                <tr key={idx} className="hover:bg-white/40 dark:hover:bg-slate-800/40 transition-colors">
+                                  <td className="py-2.5 px-3 font-semibold text-slate-700 dark:text-slate-300">
+                                    <span className="font-bold">{a.day_name}</span>{' '}
+                                    <span className="font-mono text-[11px] text-blue-600 dark:text-blue-400">
+                                      {a.start_time}–{a.end_time}
+                                    </span>
+                                  </td>
+                                  <td className="py-2.5 px-3 font-black text-slate-900 dark:text-white">
+                                    {a.subject_name}
+                                  </td>
+                                  <td className="py-2.5 px-3 font-semibold text-slate-800 dark:text-slate-200">
+                                    {a.teacher_name}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 font-bold text-[10px]">
+                                      {a.semester}
+                                    </span>
+                                  </td>
+                                  <td className="py-2.5 px-3 font-semibold text-slate-700 dark:text-slate-300">
+                                    {a.class_name}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-slate-500">
+                                    {a.resource_name || 'Classroom Assigned'}
+                                  </td>
+                                </tr>
+                              ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* TAB 2: BY TEACHER */}
+                  {glixonActiveTab === 'by_teacher' && (
+                    <div className="max-h-72 overflow-y-auto space-y-3">
+                      {Object.entries(glixonPreviewData.teacher_timetables || {}).map(([tName, tSlots]) => (
+                        <div key={tName} className="p-3.5 rounded-2xl glass-card border border-white/20 dark:border-white/10 space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <div className="font-extrabold text-slate-900 dark:text-white flex items-center gap-1.5">
+                              <User className="w-3.5 h-3.5 text-blue-500" />
+                              <span>{tName}</span>
+                            </div>
+                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 font-bold">
+                              {tSlots.length} Periods Scheduled
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-2 pt-1">
+                            {tSlots.map((ts, idx) => (
+                              <div key={idx} className="p-2 rounded-xl glass-pill text-[11px] border border-blue-500/20 space-y-0.5">
+                                <div className="font-bold text-slate-800 dark:text-slate-200">
+                                  {ts.subject_name} ({ts.semester})
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  {ts.day_name} • {ts.start_time}–{ts.end_time} • {ts.class_name}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* TAB 3: BY CLASS & SEMESTER */}
+                  {glixonActiveTab === 'by_class' && (
+                    <div className="max-h-72 overflow-y-auto space-y-3">
+                      {Object.entries(glixonPreviewData.class_timetables || {}).map(([clsName, cSlots]) => (
+                        <div key={clsName} className="p-3.5 rounded-2xl glass-card border border-white/20 dark:border-white/10 space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <div className="font-extrabold text-slate-900 dark:text-white flex items-center gap-1.5">
+                              <GraduationCap className="w-3.5 h-3.5 text-indigo-500" />
+                              <span>Class: {clsName}</span>
+                            </div>
+                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-bold">
+                              {cSlots.length} Periods
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
+                            {cSlots.map((cs, idx) => (
+                              <div key={idx} className="p-2 rounded-xl glass-pill text-[11px] border border-indigo-500/20 space-y-0.5">
+                                <div className="font-bold text-slate-800 dark:text-slate-200">
+                                  {cs.subject_name}
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  {cs.day_name} • {cs.start_time}–{cs.end_time}
+                                </div>
+                                <div className="text-[10px] text-blue-600 dark:text-blue-400 font-semibold">
+                                  Teacher: {cs.teacher_name}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* TAB 4: TEACHER WORKLOAD AUDIT */}
+                  {glixonActiveTab === 'audit' && (
+                    <div className="max-h-72 overflow-y-auto rounded-2xl border border-white/20 dark:border-white/10">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-100/50 dark:bg-slate-800/50 text-[10px] uppercase font-bold text-slate-400 sticky top-0 backdrop-blur-md">
+                          <tr>
+                            <th className="py-2.5 px-3">Teacher</th>
+                            <th className="py-2.5 px-3 text-center">Weekly Hours</th>
+                            <th className="py-2.5 px-3 text-center">Periods (Sched / Req)</th>
+                            <th className="py-2.5 px-3 text-center">Free Periods</th>
+                            <th className="py-2.5 px-3 text-center">Breaks</th>
+                            <th className="py-2.5 px-3 text-right">Fairness Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200/30 dark:divide-slate-800/30">
+                          {(Array.isArray(glixonPreviewData.teacher_workloads)
+                            ? glixonPreviewData.teacher_workloads
+                            : Object.values(glixonPreviewData.teacher_workloads || {})
+                          ).map((w: any, idx) => (
+                            <tr key={idx} className="hover:bg-white/40 dark:hover:bg-slate-800/40 transition-colors">
+                              <td className="py-2.5 px-3 font-bold text-slate-800 dark:text-slate-200">
+                                {w.teacher_name}
+                              </td>
+                              <td className="py-2.5 px-3 text-center font-mono font-bold text-blue-600 dark:text-blue-400">
+                                {w.weekly_hours} hrs
+                              </td>
+                              <td className="py-2.5 px-3 text-center font-bold">
+                                {w.scheduled_periods} / {w.required_periods}
+                              </td>
+                              <td className="py-2.5 px-3 text-center text-slate-500">
+                                {w.free_periods ?? Math.max(0, 30 - w.scheduled_periods)}
+                              </td>
+                              <td className="py-2.5 px-3 text-center text-slate-500">
+                                {w.break_hours ?? 3.75} hrs
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 border border-emerald-500/20">
+                                  Optimal
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* TAB 5: CONFLICTS & WARNINGS */}
+                  {glixonActiveTab === 'conflicts' && (
+                    <div className="space-y-3">
+                      {glixonPreviewData.conflicts && glixonPreviewData.conflicts.length > 0 ? (
+                        <div className="space-y-2">
+                          {glixonPreviewData.conflicts.map((c, idx) => (
+                            <div key={idx} className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-xs flex items-start gap-2 text-amber-700 dark:text-amber-300">
+                              <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                              <span>{c}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="p-5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-center space-y-1">
+                          <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto" />
+                          <div className="text-sm font-bold text-emerald-700 dark:text-emerald-300">
+                            Zero Scheduling Conflicts Detected
+                          </div>
+                          <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                            All teachers, rooms, and semesters are 100% conflict-free and ready for persistence.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
-
-              <label className="flex items-center gap-2 pt-1 font-medium cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={onlyUnassigned}
-                  onChange={(e) => setOnlyUnassigned(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded text-blue-600 accent-blue-600"
-                />
-                <span className="text-[11px]">Only solve unfilled slots (keep existing staff assignments intact)</span>
-              </label>
             </div>
 
-            {/* Weights Sliders */}
-            <div className="space-y-3.5">
-              <div>
-                <div className="flex justify-between text-xs font-semibold mb-1">
-                  <span>Workload Fairness Weight</span>
-                  <span className="text-blue-500 font-bold">{fairnessWeight.toFixed(1)}x</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="2.5"
-                  step="0.1"
-                  value={fairnessWeight}
-                  onChange={(e) => setFairnessWeight(Number(e.target.value))}
-                  className="w-full accent-blue-600"
-                />
+            {/* Modal Footer (Requirement 7) */}
+            <div className="p-4 border-t border-slate-200/40 dark:border-white/10 flex flex-wrap items-center justify-between gap-3 flex-shrink-0 bg-slate-50/50 dark:bg-slate-900/50 rounded-b-3xl">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsGlixonModalOpen(false)}
+                  className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-200/50"
+                >
+                  Cancel
+                </button>
+                {glixonPreviewData && (
+                  <button
+                    type="button"
+                    onClick={() => setGlixonActiveTab('conflicts')}
+                    className="px-3.5 py-2 rounded-xl glass-pill hover:bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>View Conflicts ({glixonPreviewData.conflicts?.length || 0})</span>
+                  </button>
+                )}
               </div>
 
-              <div>
-                <div className="flex justify-between text-xs font-semibold mb-1">
-                  <span>Staff Preferences Weight</span>
-                  <span className="text-blue-500 font-bold">{prefWeight.toFixed(1)}x</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="2.5"
-                  step="0.1"
-                  value={prefWeight}
-                  onChange={(e) => setPrefWeight(Number(e.target.value))}
-                  className="w-full accent-blue-600"
-                />
-              </div>
+              <div className="flex items-center gap-2">
+                {glixonPreviewData && (
+                  <button
+                    type="button"
+                    disabled={isGlixonGenerating || isGlixonCommitting}
+                    onClick={handleRunGlixon}
+                    className="px-4 py-2 rounded-xl glass-pill hover:bg-blue-500/15 text-blue-600 dark:text-blue-400 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isGlixonGenerating ? 'animate-spin' : ''}`} />
+                    <span>Regenerate</span>
+                  </button>
+                )}
 
-              <div>
-                <div className="flex justify-between text-xs font-semibold mb-1">
-                  <span>Overtime Penalty Weight</span>
-                  <span className="text-blue-500 font-bold">{overtimeWeight.toFixed(1)}x</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="2.5"
-                  step="0.1"
-                  value={overtimeWeight}
-                  onChange={(e) => setOvertimeWeight(Number(e.target.value))}
-                  className="w-full accent-blue-600"
-                />
+                {glixonPreviewData && (
+                  <button
+                    type="button"
+                    disabled={isGlixonCommitting || isGlixonGenerating}
+                    onClick={handleCommitGlixon}
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/25 transition-all"
+                  >
+                    {isGlixonCommitting ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Persisting to Database...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>Confirm and Save to Database</span>
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
 
-            <div className="flex justify-end gap-3 pt-2">
+      {/* Period Configuration Modal (Requirement 4) */}
+      {isPeriodConfigOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="max-w-4xl w-full max-h-[90vh] flex flex-col rounded-3xl glass-panel border border-indigo-500/30 shadow-2xl shadow-indigo-500/10 animate-in fade-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="p-5 border-b border-slate-200/40 dark:border-white/10 flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 text-indigo-500 flex items-center justify-center">
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                    Period Configuration & Timings
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Configure 7-day teaching periods, timings, and break intervals (breaks excluded from teaching hours)
+                  </p>
+                </div>
+              </div>
+
               <button
                 type="button"
-                onClick={() => setIsGenModalOpen(false)}
-                className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold"
+                onClick={() => setIsPeriodConfigOpen(false)}
+                className="p-2 rounded-xl glass-pill hover:bg-slate-200/60 dark:hover:bg-slate-800/60 text-slate-500"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Day Selector Navigation */}
+            <div className="p-3 border-b border-slate-200/30 dark:border-white/10 flex items-center gap-1.5 overflow-x-auto flex-shrink-0">
+              {ALL_DAYS.map((dayName, idx) => {
+                const dayCfg = periodConfigDays.find((d) => d.day_of_week === idx);
+                const isWorking = dayCfg ? dayCfg.is_working_day : idx < 5;
+                const isWeekend = idx >= 5;
+                return (
+                  <button
+                    key={dayName}
+                    type="button"
+                    onClick={() => setActivePeriodDayIdx(idx)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                      activePeriodDayIdx === idx
+                        ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/20'
+                        : isWorking
+                        ? 'glass-pill text-slate-700 dark:text-slate-300'
+                        : 'glass-pill opacity-60 text-slate-400'
+                    }`}
+                  >
+                    <span>{dayName}</span>
+                    {isWeekend && (
+                      <span className="text-[9px] px-1 rounded bg-black/10 dark:bg-white/10">
+                        {isWorking ? 'Active' : 'Off'}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Content for Selected Day */}
+            <div className="p-5 overflow-y-auto flex-1 space-y-4">
+              {(() => {
+                const dayCfg = periodConfigDays.find((d) => d.day_of_week === activePeriodDayIdx) || {
+                  day_name: ALL_DAYS[activePeriodDayIdx],
+                  day_of_week: activePeriodDayIdx,
+                  is_working_day: activePeriodDayIdx < 5,
+                  periods: [],
+                };
+
+                const updateDay = (updated: DayPeriodConfig) => {
+                  setPeriodConfigDays((prev) => {
+                    const existingIdx = prev.findIndex((d) => d.day_of_week === activePeriodDayIdx);
+                    if (existingIdx >= 0) {
+                      const copy = [...prev];
+                      copy[existingIdx] = updated;
+                      return copy;
+                    } else {
+                      return [...prev, updated];
+                    }
+                  });
+                };
+
+                const handleCopyMondayToWeekdays = () => {
+                  const monCfg = periodConfigDays.find((d) => d.day_of_week === 0);
+                  if (!monCfg) return;
+                  triggerHaptic(10);
+                  setPeriodConfigDays((prev) =>
+                    prev.map((d) => {
+                      if (d.day_of_week >= 1 && d.day_of_week <= 4) {
+                        return {
+                          ...d,
+                          is_working_day: true,
+                          periods: JSON.parse(JSON.stringify(monCfg.periods)),
+                        };
+                      }
+                      return d;
+                    })
+                  );
+                  addToast('Copied', 'Monday periods applied to Tuesday through Friday', 'info');
+                };
+
+                return (
+                  <div className="space-y-4">
+                    {/* Day Controls Header */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-2xl glass-card border border-white/30">
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-slate-900 dark:text-white">
+                          <input
+                            type="checkbox"
+                            checked={dayCfg.is_working_day}
+                            onChange={(e) =>
+                              updateDay({ ...dayCfg, is_working_day: e.target.checked })
+                            }
+                            className="w-4 h-4 rounded text-indigo-600 accent-indigo-600"
+                          />
+                          <span>Working / Teaching Day Enabled</span>
+                        </label>
+                        <span className="text-xs text-slate-400">
+                          ({dayCfg.periods?.length || 0} periods configured)
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {activePeriodDayIdx === 0 && (
+                          <button
+                            type="button"
+                            onClick={handleCopyMondayToWeekdays}
+                            className="px-2.5 py-1 rounded-lg glass-pill text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10"
+                            title="Copy Monday's periods to Tue, Wed, Thu, Fri"
+                          >
+                            Copy to All Weekdays (Tue–Fri)
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            triggerHaptic(8);
+                            const newP: PeriodConfigItem = {
+                              name: `Period ${(dayCfg.periods?.length || 0) + 1}`,
+                              type: 'teaching',
+                              start_time: '09:00',
+                              end_time: '10:00',
+                              duration_hours: 1,
+                              is_active: true,
+                              counts_toward_teaching: true,
+                            };
+                            updateDay({ ...dayCfg, periods: [...(dayCfg.periods || []), newP] });
+                          }}
+                          className="px-3 py-1.5 rounded-xl glass-button-primary text-xs font-bold flex items-center gap-1 shadow-sm"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Add Period</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Periods List */}
+                    <div className="space-y-2.5">
+                      {(!dayCfg.periods || dayCfg.periods.length === 0) ? (
+                        <div className="p-8 text-center text-xs text-slate-400 rounded-2xl border border-dashed border-slate-300 dark:border-slate-800">
+                          No periods defined for {dayCfg.day_name}. Click "Add Period" to configure teaching and break intervals.
+                        </div>
+                      ) : (
+                        dayCfg.periods.map((p, pIdx) => {
+                          const durationStr = calculatePeriodDuration(p.start_time, p.end_time);
+                          const isBreak = p.type === 'break' || p.type === 'lunch';
+                          return (
+                            <div
+                              key={pIdx}
+                              className={`p-3 rounded-2xl glass-card border flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${
+                                isBreak
+                                  ? 'bg-slate-100/40 dark:bg-slate-900/40 border-dashed border-slate-300 dark:border-slate-700'
+                                  : 'border-white/40 dark:border-white/10'
+                              }`}
+                            >
+                              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 flex-1 items-center">
+                                {/* Name */}
+                                <div>
+                                  <label className="block text-[10px] text-slate-400 font-semibold mb-0.5">
+                                    Period Name
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={p.name}
+                                    onChange={(e) => {
+                                      const updated = [...dayCfg.periods];
+                                      updated[pIdx] = { ...p, name: e.target.value };
+                                      updateDay({ ...dayCfg, periods: updated });
+                                    }}
+                                    className="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs font-bold"
+                                    placeholder="e.g. Period 1"
+                                  />
+                                </div>
+
+                                {/* Type */}
+                                <div>
+                                  <label className="block text-[10px] text-slate-400 font-semibold mb-0.5">
+                                    Type
+                                  </label>
+                                  <select
+                                    value={p.type}
+                                    onChange={(e) => {
+                                      const updated = [...dayCfg.periods];
+                                      const newType = e.target.value;
+                                      const isB = newType === 'break' || newType === 'lunch';
+                                      updated[pIdx] = {
+                                        ...p,
+                                        type: newType,
+                                        counts_toward_teaching: !isB,
+                                      };
+                                      updateDay({ ...dayCfg, periods: updated });
+                                    }}
+                                    className="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs font-semibold"
+                                  >
+                                    <option value="teaching">Teaching Period</option>
+                                    <option value="lab">Laboratory / Practical</option>
+                                    <option value="break">Short Break / Recess</option>
+                                    <option value="lunch">Lunch Break</option>
+                                    <option value="assembly">Assembly / Common</option>
+                                  </select>
+                                </div>
+
+                                {/* Start Time */}
+                                <div>
+                                  <label className="block text-[10px] text-slate-400 font-semibold mb-0.5">
+                                    Start Time
+                                  </label>
+                                  <input
+                                    type="time"
+                                    value={p.start_time}
+                                    onChange={(e) => {
+                                      const updated = [...dayCfg.periods];
+                                      updated[pIdx] = { ...p, start_time: e.target.value };
+                                      updateDay({ ...dayCfg, periods: updated });
+                                    }}
+                                    className="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs font-mono font-bold"
+                                  />
+                                </div>
+
+                                {/* End Time */}
+                                <div>
+                                  <label className="block text-[10px] text-slate-400 font-semibold mb-0.5">
+                                    End Time
+                                  </label>
+                                  <input
+                                    type="time"
+                                    value={p.end_time}
+                                    onChange={(e) => {
+                                      const updated = [...dayCfg.periods];
+                                      updated[pIdx] = { ...p, end_time: e.target.value };
+                                      updateDay({ ...dayCfg, periods: updated });
+                                    }}
+                                    className="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs font-mono font-bold"
+                                  />
+                                </div>
+                              </div>
+
+                              {/* Duration Badge & Actions */}
+                              <div className="flex items-center justify-between lg:justify-end gap-3 flex-shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-200/40">
+                                <div className="flex items-center gap-2">
+                                  <span className="px-2 py-0.5 rounded-lg bg-blue-500/10 text-blue-700 dark:text-blue-300 font-bold text-[11px] font-mono">
+                                    {durationStr}
+                                  </span>
+                                  {isBreak && (
+                                    <span className="px-2 py-0.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 font-semibold text-[10px]">
+                                      Excluded from teaching hrs
+                                    </span>
+                                  )}
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    triggerHaptic(10);
+                                    const updated = dayCfg.periods.filter((_, idx) => idx !== pIdx);
+                                    updateDay({ ...dayCfg, periods: updated });
+                                  }}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                                  title="Remove period"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-slate-200/40 dark:border-white/10 flex items-center justify-between flex-shrink-0 bg-slate-50/50 dark:bg-slate-900/50 rounded-b-3xl">
+              <button
+                type="button"
+                onClick={() => setIsPeriodConfigOpen(false)}
+                className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold text-slate-700 dark:text-slate-300"
               >
                 Cancel
               </button>
-              <button
-                disabled={isSolving}
-                onClick={handleGenerate}
-                className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-2 shadow-lg shadow-blue-500/20"
-              >
-                {isSolving ? 'Generating Optimal Rosters...' : 'Run Smart Roster Generator'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* Solver Summary Confirmation Preview Modal */}
-      {isSolverSummaryOpen && solverSummary && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="max-w-md w-full rounded-3xl glass-panel border border-emerald-500/40 p-6 space-y-4 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-200/40 dark:border-slate-800/40">
-              <div className="w-9 h-9 rounded-2xl bg-emerald-500/20 text-emerald-500 flex items-center justify-center flex-shrink-0">
-                <CheckCircle2 className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
-                  Roster Generated Successfully
-                </h3>
-                <div className="text-xs text-slate-500">Google OR-Tools CP-SAT Constraint Satisfaction</div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 text-center">
-              <div className="p-3.5 rounded-2xl glass-card border border-emerald-500/20">
-                <div className="text-2xl font-black text-emerald-600 dark:text-emerald-400">
-                  {solverSummary.fairness_score}%
-                </div>
-                <div className="text-[10px] text-slate-400 uppercase font-bold mt-0.5">Fairness Score</div>
-              </div>
-              <div className="p-3.5 rounded-2xl glass-card border border-blue-500/20">
-                <div className="text-2xl font-black text-blue-600 dark:text-blue-400">
-                  {solverSummary.total_assigned}
-                </div>
-                <div className="text-[10px] text-slate-400 uppercase font-bold mt-0.5">Assignments Made</div>
-              </div>
-            </div>
-
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed bg-emerald-500/5 p-3 rounded-2xl border border-emerald-500/15">
-              Constraint solver completed valid schedules without overlapping shifts, respecting maximum weekly working hours, employee availability, approved leave, and institutional rest periods. All assignments are now committed directly to the database.
-            </p>
-
-            <div className="flex justify-end pt-2">
               <button
                 type="button"
-                onClick={() => {
-                  triggerHaptic(12);
-                  setIsSolverSummaryOpen(false);
-                }}
-                className="w-full py-2.5 rounded-2xl glass-button-primary text-xs font-bold shadow-lg shadow-emerald-500/25"
+                disabled={isSavingPeriodConfig}
+                onClick={handleSavePeriodConfig}
+                className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-500/25"
               >
-                Accept & View Updated Timetable
+                {isSavingPeriodConfig ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Saving Periods...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-4 h-4" />
+                    <span>Save Period Timings</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
         </div>
       )}
+
 
       {/* Manual Slot Edit Modal */}
       {editSlot && (

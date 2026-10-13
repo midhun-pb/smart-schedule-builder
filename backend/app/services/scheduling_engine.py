@@ -206,6 +206,32 @@ class SchedulingEngine:
                         disqualification_reasons[(s_idx, p_idx)] = "Not assigned to teach this subject"
                         continue
 
+                    # Check assignment working days, unavailable periods, and class matching
+                    matching_tas = [
+                        ta for ta in teacher_assignments
+                        if ta.get("person_id") == p_id and ta.get("subject_id") == slot_sub_id
+                    ]
+                    if matching_tas:
+                        ta_cfg = matching_tas[0]
+                        allowed_days = ta_cfg.get("allowed_working_days")
+                        slot_day = slot.get("day_of_week")
+                        if allowed_days is not None and slot_day is not None and slot_day not in allowed_days:
+                            disqualification_reasons[(s_idx, p_idx)] = f"Day {slot_day} not an allowed working day for this subject"
+                            continue
+
+                        unavail = ta_cfg.get("unavailable_periods", [])
+                        slot_title = slot.get("title", "")
+                        slot_time = slot.get("start_time", "")
+                        if unavail and any(u.lower() in slot_title.lower() or u in slot_time for u in unavail):
+                            disqualification_reasons[(s_idx, p_idx)] = "Period marked as unavailable by teacher"
+                            continue
+
+                        ta_class = ta_cfg.get("class_name")
+                        slot_class = slot.get("class_name") or (slot.get("profession_metadata") or {}).get("class")
+                        if ta_class and slot_class and ta_class.strip().lower() != slot_class.strip().lower():
+                            disqualification_reasons[(s_idx, p_idx)] = f"Assigned to {ta_class}, not {slot_class}"
+                            continue
+
                 # 3. Skill & Qualification hard check
                 qualified, reason = self._is_qualified(person, slot)
                 if not qualified:
@@ -280,6 +306,43 @@ class SchedulingEngine:
                         s2_vars = [x[(s2_idx, p_idx)] for p_idx in eligible_candidates[s2_idx]]
                         if s1_vars and s2_vars:
                             model.Add(sum(s1_vars) + sum(s2_vars) <= 1)
+
+        # Hard Constraint: No room or laboratory can have overlapping bookings
+        room_slots: Dict[int, List[int]] = {}
+        for s_idx, s in enumerate(slots):
+            r_id = s.get("resource_id")
+            if r_id:
+                room_slots.setdefault(r_id, []).append(s_idx)
+
+        for r_id, r_s_indices in room_slots.items():
+            num_r = len(r_s_indices)
+            for i in range(num_r):
+                s1_idx = r_s_indices[i]
+                s1_start, s1_end, _ = slot_intervals[s1_idx]
+                for j in range(i + 1, num_r):
+                    s2_idx = r_s_indices[j]
+                    s2_start, s2_end, _ = slot_intervals[s2_idx]
+                    if is_overlapping_interval(s1_start, s1_end, s2_start, s2_end):
+                        s1_vars = [x[(s1_idx, p_idx)] for p_idx in eligible_candidates[s1_idx]]
+                        s2_vars = [x[(s2_idx, p_idx)] for p_idx in eligible_candidates[s2_idx]]
+                        if s1_vars and s2_vars:
+                            model.Add(sum(s1_vars) + sum(s2_vars) <= 1)
+
+        # Hard Constraint: Max periods per day per teacher
+        for p_idx, person in enumerate(people):
+            p_id = person.get("id")
+            p_max_per_day = 4
+            for ta in teacher_assignments:
+                if ta.get("person_id") == p_id and ta.get("max_periods_per_day"):
+                    p_max_per_day = max(p_max_per_day, ta.get("max_periods_per_day", 4))
+
+            for d_idx in range(7):
+                day_slots = [
+                    s_idx for s_idx in range(num_slots)
+                    if slots[s_idx].get("day_of_week") == d_idx and p_idx in eligible_candidates[s_idx]
+                ]
+                if len(day_slots) > p_max_per_day:
+                    model.Add(sum(x[(s_idx, p_idx)] for s_idx in day_slots) <= p_max_per_day)
 
         # Hard Constraint: Max working hours per week per person
         person_workload_vars = []

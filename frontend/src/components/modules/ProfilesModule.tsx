@@ -21,7 +21,16 @@ import {
   Briefcase,
   Layers,
   X,
+  ChevronDown,
+  ChevronRight,
+  Plus,
+  Calendar,
+  Clock,
+  Check,
+  Shield,
+  GraduationCap,
 } from 'lucide-react';
+import { Semester, Subject, Department, TeacherSubjectAssignment } from '../../types';
 
 export const ProfilesModule: React.FC = () => {
   const { activeOrg, addToast } = useApp();
@@ -51,6 +60,25 @@ export const ProfilesModule: React.FC = () => {
   const [importPreview, setImportPreview] = useState<any>(null);
   const [isImporting, setIsImporting] = useState(false);
 
+  // Teaching Assignments state for selected person
+  const [personAssignments, setPersonAssignments] = useState<TeacherSubjectAssignment[]>([]);
+  const [semestersList, setSemestersList] = useState<Semester[]>([]);
+  const [subjectsList, setSubjectsList] = useState<Subject[]>([]);
+  const [departmentsList, setDepartmentsList] = useState<Department[]>([]);
+  const [expandedSemesters, setExpandedSemesters] = useState<Record<string, boolean>>({});
+  const [isAddAssignOpen, setIsAddAssignOpen] = useState(false);
+  const [assignSemester, setAssignSemester] = useState('S3');
+  const [assignDeptId, setAssignDeptId] = useState<number | undefined>(undefined);
+  const [assignSubjectId, setAssignSubjectId] = useState<number | undefined>(undefined);
+  const [assignClass, setAssignClass] = useState('S3 A');
+  const [assignPeriods, setAssignPeriods] = useState(4);
+  const [assignHours, setAssignHours] = useState(4.0);
+  const [assignDays, setAssignDays] = useState<number[]>([0, 1, 2, 3, 4]);
+  const [assignPrefPeriods, setAssignPrefPeriods] = useState('Period 1, Period 2');
+  const [assignMaxPerDay, setAssignMaxPerDay] = useState(2);
+  const [assignStatus, setAssignStatus] = useState('active');
+  const [isSavingAssign, setIsSavingAssign] = useState(false);
+
   const fetchPeople = async () => {
     if (!activeOrg) return;
     try {
@@ -69,6 +97,92 @@ export const ProfilesModule: React.FC = () => {
   useEffect(() => {
     fetchPeople();
   }, [activeOrg, searchQuery]);
+
+  // Load academic metadata and teacher assignments when selectedPerson changes
+  const loadPersonAssignments = async (personId: number) => {
+    if (!activeOrg) return;
+    try {
+      const [resGroup, sems, subs, depts] = await Promise.all([
+        api.getTeacherAssignments(activeOrg.id, { person_id: personId }),
+        api.getSemesters(activeOrg.id),
+        api.getSubjects(activeOrg.id),
+        api.getDepartments(activeOrg.id)
+      ]);
+      setPersonAssignments(resGroup);
+      setSemestersList(sems);
+      setSubjectsList(subs);
+      setDepartmentsList(depts);
+      // Auto expand semesters
+      const exp: Record<string, boolean> = {};
+      resGroup.forEach((a: TeacherSubjectAssignment) => {
+        if (a.semester) exp[a.semester] = true;
+      });
+      sems.forEach((s: Semester) => {
+        if (!(s.code in exp)) exp[s.code] = true;
+      });
+      setExpandedSemesters(exp);
+      if (sems.length > 0 && !assignSemester) {
+        setAssignSemester(sems[0].code);
+      }
+    } catch (err) {
+      console.error('Failed to load teacher assignments', err);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedPerson) {
+      loadPersonAssignments(selectedPerson.id);
+    }
+  }, [selectedPerson, activeOrg]);
+
+  const handleSaveTeacherAssignment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrg || !selectedPerson || !assignSubjectId) return;
+    triggerHaptic(15);
+    setIsSavingAssign(true);
+    try {
+      const sub = subjectsList.find((s) => s.id === assignSubjectId);
+      const semObj = semestersList.find((s) => s.code === assignSemester);
+      const prefList = assignPrefPeriods
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean);
+
+      await api.createTeacherAssignment(activeOrg.id, {
+        person_id: selectedPerson.id,
+        subject_id: assignSubjectId,
+        department_id: assignDeptId || sub?.department_id || selectedPerson.department_id,
+        semester_id: semObj?.id || sub?.semester_id,
+        semester: assignSemester || sub?.semester || 'S3',
+        class_name: assignClass || sub?.class_name || 'Section A',
+        required_hours: assignHours || sub?.required_hours_per_week || 4.0,
+        required_periods: assignPeriods || 4,
+        allowed_working_days: assignDays,
+        preferred_periods: prefList,
+        max_periods_per_day: assignMaxPerDay || 2,
+        assignment_status: assignStatus || 'active'
+      });
+      addToast('Assignment Saved', `Assigned ${sub?.name || 'subject'} to ${selectedPerson.name} for ${assignSemester}`, 'success');
+      setIsAddAssignOpen(false);
+      loadPersonAssignments(selectedPerson.id);
+    } catch (err: any) {
+      addToast('Assignment Failed', err.message || 'Could not save assignment', 'error');
+    } finally {
+      setIsSavingAssign(false);
+    }
+  };
+
+  const handleDeleteTeacherAssignment = async (id: number) => {
+    if (!activeOrg || !selectedPerson) return;
+    triggerHaptic(12);
+    try {
+      await api.deleteTeacherAssignment(activeOrg.id, id);
+      addToast('Assignment Removed', 'Teacher assignment removed successfully', 'info');
+      loadPersonAssignments(selectedPerson.id);
+    } catch (err: any) {
+      addToast('Remove Failed', err.message || 'Could not delete assignment', 'error');
+    }
+  };
 
   const handleCreatePerson = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -667,28 +781,466 @@ export const ProfilesModule: React.FC = () => {
         </div>
       )}
 
-      {/* Detail Modal */}
+      {/* Detail Modal with Dynamic Multi-Semester Teaching Assignments */}
       {selectedPerson && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="max-w-lg w-full rounded-3xl glass-panel border border-white/40 dark:border-white/10 p-6 space-y-4 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-slate-200/40 pb-3">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="max-w-3xl w-full rounded-3xl glass-panel border border-white/40 dark:border-white/10 p-6 md:p-8 space-y-6 animate-in fade-in zoom-in-95 duration-200 max-h-[90vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-200/40 dark:border-slate-800/80 pb-4">
               <div>
-                <h3 className="text-base font-bold text-slate-900 dark:text-white">{selectedPerson.name}</h3>
-                <div className="text-xs text-blue-500 font-semibold">{selectedPerson.role_title} • {selectedPerson.employee_code}</div>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-500 text-white flex items-center justify-center font-bold text-base shadow-md">
+                    {selectedPerson.name.charAt(0)}
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">{selectedPerson.name}</h3>
+                    <div className="text-xs text-blue-500 font-semibold flex items-center gap-2">
+                      <span>{selectedPerson.role_title}</span>
+                      <span>•</span>
+                      <span>{selectedPerson.employee_code}</span>
+                      <span>•</span>
+                      <span className="text-slate-500">{selectedPerson.department_name || 'General Dept'}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <button onClick={() => setSelectedPerson(null)} className="p-1 rounded-lg glass-pill">
+              <button
+                onClick={() => {
+                  setSelectedPerson(null);
+                  setIsAddAssignOpen(false);
+                }}
+                className="p-1.5 rounded-xl glass-pill hover:bg-slate-500/10 transition-colors"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="space-y-3 text-xs">
-              <div>
-                <span className="font-semibold text-slate-400">Verified Qualifications:</span>
-                <div className="text-slate-800 dark:text-slate-200 mt-0.5">{selectedPerson.qualifications.join(', ') || 'None recorded'}</div>
+            {/* Quick Profile Stats Bar */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="p-3 rounded-2xl glass-pill">
+                <span className="text-[10px] text-slate-400 font-semibold uppercase block">Weekly Limit</span>
+                <span className="font-bold text-slate-800 dark:text-slate-200">{selectedPerson.max_hours_per_week}h / week</span>
+              </div>
+              <div className="p-3 rounded-2xl glass-pill">
+                <span className="text-[10px] text-slate-400 font-semibold uppercase block">Data Quality</span>
+                <span className="font-bold text-emerald-500">{selectedPerson.data_quality_score}% Verified</span>
+              </div>
+              <div className="p-3 rounded-2xl glass-pill">
+                <span className="text-[10px] text-slate-400 font-semibold uppercase block">Active Semesters</span>
+                <span className="font-bold text-blue-500">
+                  {Array.from(new Set(personAssignments.map((a) => a.semester).filter(Boolean))).length} Semesters
+                </span>
+              </div>
+              <div className="p-3 rounded-2xl glass-pill">
+                <span className="text-[10px] text-slate-400 font-semibold uppercase block">Teaching Load</span>
+                <span className="font-bold text-purple-500">
+                  {personAssignments.reduce((acc, a) => acc + (a.required_periods || 4), 0)} Periods/wk
+                </span>
+              </div>
+            </div>
+
+            {/* SECTION: TEACHING ASSIGNMENTS (Requirement 2 & 3) */}
+            <div className="space-y-4 pt-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/40 dark:border-slate-800/80 pb-3">
+                <div className="flex items-center gap-2">
+                  <GraduationCap className="w-5 h-5 text-blue-500" />
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900 dark:text-white">Teaching Assignments</h4>
+                    <p className="text-[11px] text-slate-500">
+                      Configure individual semester subjects, required teaching periods, and working day constraints.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setIsAddAssignOpen(!isAddAssignOpen)}
+                    className="px-3 py-1.5 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>{isAddAssignOpen ? 'Close Form' : 'Add Semester Assignment'}</span>
+                  </button>
+                </div>
               </div>
 
+              {/* Add Assignment Form (Requirement 2 & 3) */}
+              {isAddAssignOpen && (
+                <form
+                  onSubmit={handleSaveTeacherAssignment}
+                  className="p-5 rounded-2xl glass-panel border border-blue-500/30 bg-blue-500/5 space-y-4 animate-in fade-in duration-200 text-xs"
+                >
+                  <div className="font-bold text-slate-900 dark:text-white flex items-center justify-between border-b border-blue-500/20 pb-2">
+                    <span>New Teaching Assignment for {selectedPerson.name}</span>
+                    <span className="text-[10px] text-blue-500 font-normal">Saves directly to database</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {/* 1. Select Semester */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Select Semester *
+                      </label>
+                      <select
+                        value={assignSemester}
+                        onChange={(e) => {
+                          setAssignSemester(e.target.value);
+                          // Auto filter subjects for this semester
+                          const filtered = subjectsList.filter((s) => !s.semester || s.semester === e.target.value);
+                          if (filtered.length > 0) setAssignSubjectId(filtered[0].id);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                        required
+                      >
+                        {semestersList.map((sem) => (
+                          <option key={sem.id} value={sem.code}>
+                            {sem.code} ({sem.name})
+                          </option>
+                        ))}
+                        {semestersList.length === 0 && (
+                          <>
+                            <option value="S1">S1 (Semester 1)</option>
+                            <option value="S3">S3 (Semester 3)</option>
+                            <option value="S5">S5 (Semester 5)</option>
+                            <option value="S7">S7 (Semester 7)</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+
+                    {/* 2. Select Department */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Department
+                      </label>
+                      <select
+                        value={assignDeptId || ''}
+                        onChange={(e) => setAssignDeptId(Number(e.target.value) || undefined)}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                      >
+                        <option value="">All Departments</option>
+                        {departmentsList.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* 3. Select Subject (Filtered by selected semester) */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Select Subject *
+                      </label>
+                      <select
+                        value={assignSubjectId || ''}
+                        onChange={(e) => {
+                          const sid = Number(e.target.value);
+                          setAssignSubjectId(sid);
+                          const chosen = subjectsList.find((s) => s.id === sid);
+                          if (chosen?.class_name) setAssignClass(chosen.class_name);
+                          if (chosen?.required_hours_per_week) setAssignHours(chosen.required_hours_per_week);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold text-blue-600 dark:text-blue-400"
+                        required
+                      >
+                        <option value="">-- Choose Subject --</option>
+                        {subjectsList
+                          .filter((s) => !assignSemester || !s.semester || s.semester === assignSemester)
+                          .map((sub) => (
+                            <option key={sub.id} value={sub.id}>
+                              {sub.name} ({sub.code})
+                            </option>
+                          ))}
+                        {subjectsList.length === 0 && (
+                          <option value="" disabled>No subjects found in database</option>
+                        )}
+                      </select>
+                    </div>
+
+                    {/* 4. Class / Section */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Class / Section *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. S3 A or CSE-A"
+                        value={assignClass}
+                        onChange={(e) => setAssignClass(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                      />
+                    </div>
+
+                    {/* 5. Required Periods Per Week */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Required Periods / Week
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="20"
+                        value={assignPeriods}
+                        onChange={(e) => setAssignPeriods(Number(e.target.value))}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                      />
+                    </div>
+
+                    {/* 6. Teaching Hours / Week */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Required Hours / Week
+                      </label>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="1"
+                        max="30"
+                        value={assignHours}
+                        onChange={(e) => setAssignHours(Number(e.target.value))}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                      />
+                    </div>
+
+                    {/* 7. Max Periods Per Day */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Max Periods / Day
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="6"
+                        value={assignMaxPerDay}
+                        onChange={(e) => setAssignMaxPerDay(Number(e.target.value))}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                      />
+                    </div>
+
+                    {/* 8. Preferred Periods */}
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Preferred Periods / Timings (comma-separated)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Period 1, Period 2, 09:00-11:00"
+                        value={assignPrefPeriods}
+                        onChange={(e) => setAssignPrefPeriods(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  {/* 9. Allowed Working Days (Mon-Sat checkboxes) */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                      Allowed Working Days for this Subject:
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        { label: 'Mon', day: 0 },
+                        { label: 'Tue', day: 1 },
+                        { label: 'Wed', day: 2 },
+                        { label: 'Thu', day: 3 },
+                        { label: 'Fri', day: 4 },
+                        { label: 'Sat', day: 5 },
+                        { label: 'Sun', day: 6 },
+                      ].map(({ label, day }) => (
+                        <button
+                          key={day}
+                          type="button"
+                          onClick={() => {
+                            setAssignDays((prev) =>
+                              prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day].sort()
+                            );
+                          }}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                            assignDays.includes(day)
+                              ? 'bg-blue-500 text-white border-blue-600 shadow-sm'
+                              : 'bg-white/40 dark:bg-slate-800/40 text-slate-500 border-slate-200/50 dark:border-slate-700/50'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-blue-500/20">
+                    <button
+                      type="button"
+                      onClick={() => setIsAddAssignOpen(false)}
+                      className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSavingAssign || !assignSubjectId}
+                      className="px-5 py-2 rounded-xl glass-button-primary text-xs font-semibold disabled:opacity-50"
+                    >
+                      {isSavingAssign ? 'Saving...' : 'Save Assignment'}
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* Collapsible Semester Sections (Requirement 2 & 10) */}
+              <div className="space-y-3">
+                {/* Collect all semesters to render */}
+                {Array.from(
+                  new Set([
+                    ...semestersList.map((s) => s.code),
+                    ...personAssignments.map((a) => a.semester).filter(Boolean),
+                    'S1', 'S3', 'S5', 'S7'
+                  ])
+                )
+                  .filter(Boolean)
+                  .map((semCode) => {
+                    const semAssignments = personAssignments.filter((a) => a.semester === semCode);
+                    const isExpanded = expandedSemesters[semCode as string] ?? true;
+
+                    return (
+                      <div
+                        key={semCode}
+                        className="rounded-2xl glass-panel border border-white/40 dark:border-white/10 overflow-hidden"
+                      >
+                        {/* Collapsible Semester Header */}
+                        <div
+                          onClick={() => {
+                            setExpandedSemesters((prev) => ({
+                              ...prev,
+                              [semCode as string]: !isExpanded,
+                            }));
+                          }}
+                          className="px-4 py-3 bg-slate-100/50 dark:bg-slate-900/50 flex items-center justify-between cursor-pointer hover:bg-blue-500/5 transition-colors"
+                        >
+                          <div className="flex items-center gap-2.5">
+                            {isExpanded ? (
+                              <ChevronDown className="w-4 h-4 text-blue-500" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4 text-slate-400" />
+                            )}
+                            <span className="font-extrabold text-xs text-slate-900 dark:text-white">
+                              {semCode}
+                            </span>
+                            <span className="text-[11px] text-slate-500">
+                              (Semester {semCode?.replace('S', '')})
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                semAssignments.length > 0
+                                  ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20'
+                                  : 'bg-slate-200/50 dark:bg-slate-800/50 text-slate-400'
+                              }`}
+                            >
+                              {semAssignments.length} {semAssignments.length === 1 ? 'Subject' : 'Subjects'} Assigned
+                            </span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setAssignSemester(semCode as string);
+                                setIsAddAssignOpen(true);
+                              }}
+                              className="px-2 py-1 rounded-lg glass-pill text-[10px] font-semibold text-blue-500 hover:bg-blue-500/10"
+                            >
+                              + Add to {semCode}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Collapsible Semester Content */}
+                        {isExpanded && (
+                          <div className="p-3 space-y-2">
+                            {semAssignments.length === 0 ? (
+                              <div className="py-4 text-center text-xs text-slate-400 italic">
+                                No subject assigned for {semCode}. Click <strong className="text-blue-500 cursor-pointer" onClick={() => { setAssignSemester(semCode as string); setIsAddAssignOpen(true); }}>+ Add to {semCode}</strong> to assign.
+                              </div>
+                            ) : (
+                              semAssignments.map((assign) => (
+                                <div
+                                  key={assign.id}
+                                  className="p-3 rounded-xl bg-white/40 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-700/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                                >
+                                  <div className="space-y-1">
+                                    <div className="flex items-center gap-2">
+                                      <strong className="text-sm font-bold text-slate-900 dark:text-white">
+                                        {assign.subject_name}
+                                      </strong>
+                                      {assign.subject_code && (
+                                        <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 text-[10px] font-mono font-bold">
+                                          {assign.subject_code}
+                                        </span>
+                                      )}
+                                      <span className="px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400 text-[10px] font-bold">
+                                        Class: {assign.class_name || 'All Sections'}
+                                      </span>
+                                    </div>
+
+                                    <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                                      <span>Dept: <strong>{assign.department_name || 'Computer Science'}</strong></span>
+                                      <span>•</span>
+                                      <span>Required: <strong className="text-blue-500">{assign.required_periods || 4} periods/wk</strong> ({assign.required_hours}h)</span>
+                                      <span>•</span>
+                                      <span>Max: <strong>{assign.max_periods_per_day || 2}/day</strong></span>
+                                      {assign.preferred_periods && assign.preferred_periods.length > 0 && (
+                                        <>
+                                          <span>•</span>
+                                          <span className="text-amber-500 font-medium">
+                                            Pref: {assign.preferred_periods.join(', ')}
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+
+                                    {assign.allowed_working_days && assign.allowed_working_days.length > 0 && (
+                                      <div className="flex items-center gap-1 text-[10px] pt-1">
+                                        <span className="text-slate-400">Allowed Days:</span>
+                                        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((dayName, idx) => (
+                                          <span
+                                            key={idx}
+                                            className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                              assign.allowed_working_days?.includes(idx)
+                                                ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                                : 'text-slate-300 dark:text-slate-600'
+                                            }`}
+                                          >
+                                            {dayName}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-2 self-end sm:self-center">
+                                    <button
+                                      onClick={() => handleDeleteTeacherAssignment(assign.id)}
+                                      className="p-1.5 rounded-lg hover:bg-red-500/10 text-red-500 transition-colors"
+                                      title="Remove Assignment"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+
+            {/* Direct & Inferred Skills footer */}
+            <div className="pt-4 border-t border-slate-200/40 dark:border-slate-800/80 space-y-3 text-xs">
               <div>
-                <span className="font-semibold text-slate-400">Direct Skills:</span>
+                <span className="font-semibold text-slate-400">Verified Skills:</span>
                 <div className="flex flex-wrap gap-1 mt-1">
                   {selectedPerson.skills.map((s, idx) => (
                     <span key={idx} className="px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 font-semibold text-[10px]">
@@ -699,19 +1251,8 @@ export const ProfilesModule: React.FC = () => {
               </div>
 
               <div>
-                <span className="font-semibold text-slate-400">Inferred Hidden Skills:</span>
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {selectedPerson.inferred_skills.map((inf, idx) => (
-                    <span key={idx} className="px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-600 dark:text-purple-400 font-semibold text-[10px]" title={inf.reason}>
-                      ~{inf.name} ({Math.round(inf.confidence * 100)}%)
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="pt-2 border-t border-slate-200/40 flex justify-between text-slate-500 text-[11px]">
-                <span>Weekly Hours Limit: {selectedPerson.max_hours_per_week}h</span>
-                <span>Data Quality: {selectedPerson.data_quality_score}%</span>
+                <span className="font-semibold text-slate-400">Verified Qualifications:</span>
+                <div className="text-slate-800 dark:text-slate-200 mt-0.5">{selectedPerson.qualifications.join(', ') || 'None recorded'}</div>
               </div>
             </div>
           </div>

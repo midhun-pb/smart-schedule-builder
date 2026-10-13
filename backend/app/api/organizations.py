@@ -1,9 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import datetime
 from app.core.database import get_db
-from app.models.models import Organization, Department, ShiftTemplate, Resource, Schedule, RequirementSlot, User, AuditLog, Subject, Person, Semester, TeacherSubjectAssignment
+from app.models.models import (
+    Organization, Department, ShiftTemplate, Resource, Schedule,
+    RequirementSlot, Assignment, User, AuditLog, Subject, Person,
+    Semester, TeacherSubjectAssignment
+)
 from app.schemas.schemas import (
     OrganizationCreate, OrganizationResponse,
     DepartmentCreate, DepartmentUpdate, DepartmentResponse,
@@ -575,6 +579,32 @@ def delete_subject(org_id: int, subject_id: int, db: Session = Depends(get_db)):
 
 # --- Teacher-Subject Assignment Endpoints ---
 
+def _format_teacher_assignment(a: TeacherSubjectAssignment) -> Dict[str, Any]:
+    return {
+        "id": a.id,
+        "org_id": a.org_id,
+        "person_id": a.person_id,
+        "teacher_name": a.teacher.name if a.teacher else "Unknown",
+        "subject_id": a.subject_id,
+        "subject_name": a.subject.name if a.subject else "Unknown",
+        "subject_code": a.subject.code if a.subject else "",
+        "department_id": a.department_id,
+        "department_name": a.department.name if a.department else "General",
+        "semester_id": a.semester_id,
+        "semester": a.semester or (a.semester_rel.code if a.semester_rel else None),
+        "class_name": a.class_name,
+        "required_hours": a.required_hours or 4.0,
+        "required_periods": getattr(a, "required_periods", 4) or 4,
+        "allowed_working_days": getattr(a, "allowed_working_days", [0, 1, 2, 3, 4]) or [0, 1, 2, 3, 4],
+        "preferred_periods": getattr(a, "preferred_periods", []) or [],
+        "unavailable_periods": getattr(a, "unavailable_periods", []) or [],
+        "max_periods_per_day": getattr(a, "max_periods_per_day", 2) or 2,
+        "eligible_rooms": a.eligible_rooms or [],
+        "is_primary": a.is_primary,
+        "assignment_status": getattr(a, "assignment_status", "active") or "active",
+        "created_at": a.created_at.isoformat() if a.created_at else None
+    }
+
 @router.get("/{org_id}/teacher-assignments")
 def list_teacher_assignments(
     org_id: int,
@@ -595,27 +625,35 @@ def list_teacher_assignments(
         query = query.filter(TeacherSubjectAssignment.department_id == department_id)
 
     assignments = query.all()
-    return [
-        {
-            "id": a.id,
-            "org_id": a.org_id,
-            "person_id": a.person_id,
-            "teacher_name": a.teacher.name if a.teacher else "Unknown",
-            "subject_id": a.subject_id,
-            "subject_name": a.subject.name if a.subject else "Unknown",
-            "subject_code": a.subject.code if a.subject else "",
-            "department_id": a.department_id,
-            "department_name": a.department.name if a.department else "General",
-            "semester_id": a.semester_id,
-            "semester": a.semester or (a.semester_rel.code if a.semester_rel else None),
-            "class_name": a.class_name,
-            "required_hours": a.required_hours,
-            "eligible_rooms": a.eligible_rooms or [],
-            "is_primary": a.is_primary,
-            "created_at": a.created_at.isoformat() if a.created_at else None
-        }
-        for a in assignments
-    ]
+    return [_format_teacher_assignment(a) for a in assignments]
+
+@router.get("/{org_id}/teachers/{person_id}/assignments")
+def get_teacher_assignments_by_person(org_id: int, person_id: int, db: Session = Depends(get_db)):
+    """
+    Returns a teacher's assignments organized by semester for clear multi-semester management.
+    """
+    teacher = db.query(Person).filter(Person.id == person_id, Person.org_id == org_id).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    assignments = db.query(TeacherSubjectAssignment).filter(
+        TeacherSubjectAssignment.org_id == org_id,
+        TeacherSubjectAssignment.person_id == person_id
+    ).all()
+
+    by_semester: Dict[str, List[Dict[str, Any]]] = {}
+    for a in assignments:
+        sem_code = a.semester or (a.semester_rel.code if a.semester_rel else "General")
+        by_semester.setdefault(sem_code, []).append(_format_teacher_assignment(a))
+
+    return {
+        "teacher_id": teacher.id,
+        "teacher_name": teacher.name,
+        "department_id": teacher.department_id,
+        "department_name": teacher.department.name if teacher.department else "General",
+        "semesters": by_semester,
+        "total_assignments": len(assignments)
+    }
 
 @router.post("/{org_id}/teacher-assignments")
 def create_teacher_assignment(org_id: int, payload: TeacherAssignmentCreate, db: Session = Depends(get_db)):
@@ -654,29 +692,20 @@ def create_teacher_assignment(org_id: int, payload: TeacherAssignmentCreate, db:
         semester=sem_val,
         class_name=payload.class_name or subject.class_name,
         required_hours=payload.required_hours or subject.required_hours_per_week or 4.0,
+        required_periods=payload.required_periods or 4,
+        allowed_working_days=payload.allowed_working_days or [0, 1, 2, 3, 4],
+        preferred_periods=payload.preferred_periods or [],
+        unavailable_periods=payload.unavailable_periods or [],
+        max_periods_per_day=payload.max_periods_per_day or 2,
         eligible_rooms=payload.eligible_rooms or [],
-        is_primary=payload.is_primary
+        is_primary=payload.is_primary,
+        assignment_status=payload.assignment_status or "active"
     )
     db.add(assign)
     db.commit()
     db.refresh(assign)
 
-    return {
-        "id": assign.id,
-        "org_id": assign.org_id,
-        "person_id": assign.person_id,
-        "teacher_name": teacher.name,
-        "subject_id": assign.subject_id,
-        "subject_name": subject.name,
-        "subject_code": subject.code,
-        "department_id": assign.department_id,
-        "semester_id": assign.semester_id,
-        "semester": assign.semester,
-        "class_name": assign.class_name,
-        "required_hours": assign.required_hours,
-        "eligible_rooms": assign.eligible_rooms,
-        "is_primary": assign.is_primary
-    }
+    return _format_teacher_assignment(assign)
 
 @router.put("/{org_id}/teacher-assignments/{assignment_id}")
 def update_teacher_assignment(org_id: int, assignment_id: int, payload: TeacherAssignmentUpdate, db: Session = Depends(get_db)):
@@ -701,13 +730,26 @@ def update_teacher_assignment(org_id: int, assignment_id: int, payload: TeacherA
         assign.class_name = payload.class_name
     if payload.required_hours is not None:
         assign.required_hours = payload.required_hours
+    if payload.required_periods is not None:
+        assign.required_periods = payload.required_periods
+    if payload.allowed_working_days is not None:
+        assign.allowed_working_days = payload.allowed_working_days
+    if payload.preferred_periods is not None:
+        assign.preferred_periods = payload.preferred_periods
+    if payload.unavailable_periods is not None:
+        assign.unavailable_periods = payload.unavailable_periods
+    if payload.max_periods_per_day is not None:
+        assign.max_periods_per_day = payload.max_periods_per_day
     if payload.eligible_rooms is not None:
         assign.eligible_rooms = payload.eligible_rooms
     if payload.is_primary is not None:
         assign.is_primary = payload.is_primary
+    if payload.assignment_status is not None:
+        assign.assignment_status = payload.assignment_status
 
     db.commit()
-    return {"success": True, "id": assign.id}
+    db.refresh(assign)
+    return _format_teacher_assignment(assign)
 
 @router.delete("/{org_id}/teacher-assignments/{assignment_id}")
 def delete_teacher_assignment(org_id: int, assignment_id: int, db: Session = Depends(get_db)):
@@ -721,6 +763,190 @@ def delete_teacher_assignment(org_id: int, assignment_id: int, db: Session = Dep
     db.delete(assign)
     db.commit()
     return {"success": True, "message": "Teacher subject assignment deleted successfully"}
+
+# --- Period Configuration Endpoints ---
+
+def _compute_period_durations(start_time: str, end_time: str) -> Tuple[int, float]:
+    try:
+        sh, sm = map(int, start_time.split(":"))
+        eh, em = map(int, end_time.split(":"))
+        start_m = sh * 60 + sm
+        end_m = eh * 60 + em
+        if end_m < start_m:
+            end_m += 24 * 60  # overnight period
+        diff_m = end_m - start_m
+        return diff_m, round(diff_m / 60.0, 2)
+    except Exception:
+        return 60, 1.0
+
+@router.get("/{org_id}/period-config")
+def get_period_config(org_id: int, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    raw_sched = (org.settings_json or {}).get("working_days_schedule") or get_default_working_days_schedule(org.type)
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+    enriched: Dict[str, Any] = {}
+    for day_idx in range(7):
+        day_key = str(day_idx)
+        day_val = raw_sched.get(day_key, {})
+        is_working = day_val.get("is_working_day", day_idx < 5)
+        periods_in = day_val.get("periods", [])
+
+        periods_out = []
+        for p in periods_in:
+            st = p.get("start_time", "09:00")
+            et = p.get("end_time", "10:00")
+            dur_m, dur_h = _compute_period_durations(st, et)
+            p_type = p.get("type", "lecture" if org.type == "college" else "work")
+            is_break = p_type in ["break", "lunch", "assembly"]
+            periods_out.append({
+                "name": p.get("name", f"Period {len(periods_out) + 1}"),
+                "type": p_type,
+                "start_time": st,
+                "end_time": et,
+                "duration_minutes": dur_m,
+                "duration_hours": dur_h,
+                "is_active": p.get("is_active", True),
+                "is_break": is_break,
+                "counts_toward_teaching": not is_break,
+                "min_staff": p.get("min_staff", 0 if is_break else 1),
+                "target_staff": p.get("target_staff", 0 if is_break else 1),
+                "max_staff": p.get("max_staff", 0 if is_break else 1)
+            })
+
+        enriched[day_key] = {
+            "day_name": day_names[day_idx],
+            "day_of_week": day_idx,
+            "is_working_day": is_working,
+            "periods": periods_out
+        }
+
+    return {
+        "org_id": org.id,
+        "org_type": org.type,
+        "working_days_schedule": enriched
+    }
+
+@router.put("/{org_id}/period-config")
+def update_period_config(org_id: int, payload: Dict[str, Any], db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    new_sched = payload.get("working_days_schedule", {})
+    validated_sched: Dict[str, Any] = {}
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+    for day_idx in range(7):
+        day_key = str(day_idx)
+        raw_day = new_sched.get(day_key, {})
+        is_working = bool(raw_day.get("is_working_day", day_idx < 5))
+        periods_in = raw_day.get("periods", [])
+
+        # Validate periods & calculate exact durations
+        validated_periods = []
+        for p in periods_in:
+            st = p.get("start_time", "09:00")
+            et = p.get("end_time", "10:00")
+            dur_m, dur_h = _compute_period_durations(st, et)
+            p_type = p.get("type", "lecture")
+            is_break = p_type in ["break", "lunch", "assembly"]
+            validated_periods.append({
+                "name": p.get("name", f"Period {len(validated_periods) + 1}"),
+                "type": p_type,
+                "start_time": st,
+                "end_time": et,
+                "duration_minutes": dur_m,
+                "duration_hours": dur_h,
+                "is_active": p.get("is_active", True),
+                "min_staff": 0 if is_break else p.get("min_staff", 1),
+                "target_staff": 0 if is_break else p.get("target_staff", 1),
+                "max_staff": 0 if is_break else p.get("max_staff", 1)
+            })
+
+        validated_sched[day_key] = {
+            "day_name": day_names[day_idx],
+            "day_of_week": day_idx,
+            "is_working_day": is_working,
+            "periods": validated_periods
+        }
+
+    current_settings = dict(org.settings_json or {})
+    current_settings["working_days_schedule"] = validated_sched
+    org.settings_json = current_settings
+    db.commit()
+
+    return {"success": True, "message": "Period configuration updated successfully", "working_days_schedule": validated_sched}
+
+# --- Teacher Workload & Fairness Audit Endpoint ---
+
+@router.get("/{org_id}/teacher-workloads")
+def get_teacher_workloads(org_id: int, schedule_id: Optional[int] = None, db: Session = Depends(get_db)):
+    teachers = db.query(Person).filter(Person.org_id == org_id, Person.status == "active").all()
+    assignments_query = db.query(Assignment).join(RequirementSlot, Assignment.slot_id == RequirementSlot.id).filter(
+        Assignment.status == "assigned"
+    )
+    if schedule_id:
+        assignments_query = assignments_query.filter(Assignment.schedule_id == schedule_id)
+    else:
+        # Take latest schedule
+        latest_sched = db.query(Schedule).filter(Schedule.org_id == org_id).order_by(Schedule.id.desc()).first()
+        if latest_sched:
+            assignments_query = assignments_query.filter(Assignment.schedule_id == latest_sched.id)
+
+    all_assignments = assignments_query.all()
+    configured_ta = db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == org_id).all()
+
+    workloads = []
+    for t in teachers:
+        t_assigned_slots = [a.slot for a in all_assignments if a.person_id == t.id and a.slot]
+        t_configured = [ta for ta in configured_ta if ta.person_id == t.id]
+
+        total_weekly_required_periods = sum(ta.required_periods or 4 for ta in t_configured)
+        scheduled_teaching_periods = len([s for s in t_assigned_slots if getattr(s, "period_type", "work") == "work"])
+        other_duties_periods = len([s for s in t_assigned_slots if getattr(s, "period_type", "work") != "work"])
+
+        teaching_hours_per_week = 0.0
+        for s in t_assigned_slots:
+            if getattr(s, "period_type", "work") == "work":
+                _, h = _compute_period_durations(s.start_time or "09:00", s.end_time or "10:00")
+                teaching_hours_per_week += h
+
+        teaching_hours_per_day = round(teaching_hours_per_week / 5.0, 1) if teaching_hours_per_week > 0 else 0.0
+        teaching_hours_per_month = round(teaching_hours_per_week * 4.0, 1)
+
+        unassigned_periods = max(0, total_weekly_required_periods - scheduled_teaching_periods)
+        max_cap = t.max_hours_per_week or 40.0
+        is_overloaded = teaching_hours_per_week > max_cap
+
+        workloads.append({
+            "teacher_id": t.id,
+            "teacher_name": t.name,
+            "department_id": t.department_id,
+            "department_name": t.department.name if t.department else "General",
+            "teaching_hours_per_day": teaching_hours_per_day,
+            "teaching_hours_per_week": round(teaching_hours_per_week, 1),
+            "teaching_hours_per_month": teaching_hours_per_month,
+            "max_hours_per_week": max_cap,
+            "required_periods": total_weekly_required_periods,
+            "scheduled_periods": scheduled_teaching_periods,
+            "unassigned_periods": unassigned_periods,
+            "other_duties_count": other_duties_periods,
+            "free_periods": max(0, 25 - scheduled_teaching_periods - other_duties_periods),
+            "break_hours": 2.5,
+            "is_overloaded": is_overloaded,
+            "assigned_semesters": list({ta.semester for ta in t_configured if ta.semester}),
+            "assigned_subjects": list({ta.subject.name for ta in t_configured if ta.subject})
+        })
+
+    return {
+        "org_id": org_id,
+        "teachers_count": len(teachers),
+        "workloads": workloads
+    }
 
 # --- Roster Readiness Checklist ---
 

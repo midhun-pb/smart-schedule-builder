@@ -74,9 +74,84 @@ export interface TeacherSubjectAssignment {
   semester?: string;
   class_name?: string;
   required_hours: number;
+  required_periods?: number;
+  allowed_working_days?: number[];
+  preferred_periods?: string[];
+  unavailable_periods?: string[];
+  max_periods_per_day?: number;
   eligible_rooms?: number[];
   is_primary?: boolean;
+  assignment_status?: string;
   created_at?: string;
+}
+
+export interface PeriodConfigItem {
+  name: string;
+  type: string;
+  start_time: string;
+  end_time: string;
+  duration_minutes?: number;
+  duration_hours?: number;
+  is_active?: boolean;
+  is_break?: boolean;
+  counts_toward_teaching?: boolean;
+  min_staff?: number;
+  target_staff?: number;
+  max_staff?: number;
+}
+
+export interface DayPeriodConfig {
+  day_name: string;
+  day_of_week: number;
+  is_working_day: boolean;
+  periods: PeriodConfigItem[];
+}
+
+export interface PeriodConfigPayload {
+  days: DayPeriodConfig[];
+}
+
+
+export interface GlixonAssignment {
+  slot_id: number;
+  teacher_id: number;
+  teacher_name: string;
+  department_id?: number;
+  department_name?: string;
+  semester: string;
+  subject_id?: number;
+  subject_name: string;
+  subject_code?: string;
+  class_name: string;
+  day_of_week: number;
+  day_name: string;
+  date_str?: string;
+  start_time: string;
+  end_time: string;
+  duration_minutes?: number;
+  duration_hours: number;
+  resource_id?: number;
+  resource_name?: string;
+  title?: string;
+}
+
+export interface GlixonPreviewResponse {
+  success: boolean;
+  preview: boolean;
+  schedule_id: number;
+  period_start?: string;
+  period_end?: string;
+  fairness_score: number;
+  total_assignments: number;
+  assignments: GlixonAssignment[];
+
+  teacher_timetables: Record<string, GlixonAssignment[]>;
+  class_timetables: Record<string, GlixonAssignment[]>;
+  semester_timetables: Record<string, GlixonAssignment[]>;
+  department_timetables: Record<string, GlixonAssignment[]>;
+  teacher_workloads: Record<string, any>;
+  unfilled_slots: number[];
+  conflicts: string[];
 }
 
 export interface User {

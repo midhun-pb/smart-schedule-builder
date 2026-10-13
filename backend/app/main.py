@@ -34,6 +34,21 @@ try:
 except Exception:
     pass
 
+for col, col_t in [
+    ("required_periods", "INTEGER DEFAULT 4"),
+    ("allowed_working_days", "JSON"),
+    ("preferred_periods", "JSON"),
+    ("unavailable_periods", "JSON"),
+    ("max_periods_per_day", "INTEGER DEFAULT 2"),
+    ("assignment_status", "VARCHAR(50) DEFAULT 'active'"),
+]:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"ALTER TABLE teacher_subject_assignments ADD COLUMN {col} {col_t}"))
+            conn.commit()
+    except Exception:
+        pass
+
 # Create database tables
 Base.metadata.create_all(bind=engine)
 
