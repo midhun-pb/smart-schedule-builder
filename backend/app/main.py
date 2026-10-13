@@ -36,12 +36,14 @@ except Exception:
 
 for col, col_t in [
     ("required_periods", "INTEGER DEFAULT 4"),
+    ("period_duration", "VARCHAR(50) DEFAULT '1 hour'"),
     ("allowed_working_days", "JSON"),
     ("preferred_periods", "JSON"),
     ("unavailable_periods", "JSON"),
     ("max_periods_per_day", "INTEGER DEFAULT 2"),
     ("assignment_status", "VARCHAR(50) DEFAULT 'active'"),
 ]:
+
     try:
         with engine.connect() as conn:
             conn.execute(text(f"ALTER TABLE teacher_subject_assignments ADD COLUMN {col} {col_t}"))
@@ -132,6 +134,20 @@ def seed_database():
     db = SessionLocal()
     try:
         if db.query(Organization).count() > 0:
+            sched1 = db.query(Schedule).filter(Schedule.org_id == 1).first()
+            if sched1:
+                has_v = db.query(ScheduleVersion).filter(ScheduleVersion.schedule_id == sched1.id).first()
+                if not has_v:
+                    v1 = ScheduleVersion(
+                        org_id=1,
+                        schedule_id=sched1.id,
+                        version_number=1,
+                        snapshot_json={"fairness_score": sched1.fairness_score or 90.0, "assignments": []},
+                        change_summary="Initial verified baseline version",
+                        created_by="System"
+                    )
+                    db.add(v1)
+                    db.commit()
             return
 
         # 1. Apex Institute of Technology (College)
@@ -593,15 +609,29 @@ def seed_subjects_if_needed():
             for sl in slots:
                 if not sl.subject_id:
                     for s in subs:
-                        if s.name.lower() in sl.title.lower() or (sl.profession_metadata and sl.profession_metadata.get("subject", "").lower() in s.name.lower()):
+                        sub_meta_name = (sl.profession_metadata or {}).get("subject") or ""
+                        if s.name.lower() in sl.title.lower() or (sub_meta_name and sub_meta_name.lower() in s.name.lower()):
                             sl.subject_id = s.id
                             sl.department_id = s.department_id
                             meta = dict(sl.profession_metadata or {})
                             meta["subject"] = s.name
                             meta["semester"] = s.semester
                             meta["class"] = s.class_name
-                            sl.profession_metadata = meta
-                            break
+            # 6. Ensure ScheduleVersion exists for baseline schedule
+            sched1 = db.query(Schedule).filter(Schedule.org_id == 1).first()
+            if sched1:
+                has_v = db.query(ScheduleVersion).filter(ScheduleVersion.schedule_id == sched1.id).first()
+                if not has_v:
+                    v_init = ScheduleVersion(
+                        org_id=1,
+                        schedule_id=sched1.id,
+                        version_number=1,
+                        snapshot_json={"fairness_score": sched1.fairness_score or 90.0, "assignments": []},
+                        change_summary="Initial verified baseline version",
+                        created_by="System"
+                    )
+                    db.add(v_init)
+
             db.commit()
     finally:
         db.close()

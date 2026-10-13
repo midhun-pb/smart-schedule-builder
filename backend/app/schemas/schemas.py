@@ -134,6 +134,7 @@ class TeacherAssignmentBase(BaseModel):
     class_name: Optional[str] = None        # "S3 A"
     required_hours: float = 4.0
     required_periods: int = 4
+    period_duration: Optional[str] = "1 hour"
     allowed_working_days: List[int] = [0, 1, 2, 3, 4]
     preferred_periods: List[str] = []
     unavailable_periods: List[str] = []
@@ -154,6 +155,7 @@ class TeacherAssignmentUpdate(BaseModel):
     class_name: Optional[str] = None
     required_hours: Optional[float] = None
     required_periods: Optional[int] = None
+    period_duration: Optional[str] = None
     allowed_working_days: Optional[List[int]] = None
     preferred_periods: Optional[List[str]] = None
     unavailable_periods: Optional[List[str]] = None
@@ -196,6 +198,7 @@ class PersonBase(BaseModel):
     max_hours_per_week: float = 40.0
     status: str = "active"
     hire_date: Optional[str] = None
+    teacher_assignments: Optional[List[Dict[str, Any]]] = None
 
 class PersonCreate(PersonBase):
     org_id: int
@@ -205,8 +208,10 @@ class PersonResponse(PersonBase):
     org_id: int
     data_quality_score: float
     created_at: datetime
+    teacher_assignments: Optional[List[Dict[str, Any]]] = []
     class Config:
         from_attributes = True
+
 
 # Resource
 class ResourceBase(BaseModel):

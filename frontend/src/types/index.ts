@@ -75,6 +75,7 @@ export interface TeacherSubjectAssignment {
   class_name?: string;
   required_hours: number;
   required_periods?: number;
+  period_duration?: string;
   allowed_working_days?: number[];
   preferred_periods?: string[];
   unavailable_periods?: string[];
@@ -198,6 +199,7 @@ export interface Person {
   data_quality_score: number;
   status: 'active' | 'inactive' | 'on_leave';
   hire_date?: string;
+  teacher_assignments?: TeacherSubjectAssignment[];
 }
 
 export interface Resource {

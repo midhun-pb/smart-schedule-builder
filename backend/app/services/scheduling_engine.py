@@ -232,11 +232,12 @@ class SchedulingEngine:
                             disqualification_reasons[(s_idx, p_idx)] = f"Assigned to {ta_class}, not {slot_class}"
                             continue
 
-                # 3. Skill & Qualification hard check
-                qualified, reason = self._is_qualified(person, slot)
-                if not qualified:
-                    disqualification_reasons[(s_idx, p_idx)] = reason
-                    continue
+                # 3. Skill & Qualification hard check (for unassigned or general slots)
+                if not (slot_sub_id and slot_sub_id in teacher_subject_map):
+                    qualified, reason = self._is_qualified(person, slot)
+                    if not qualified:
+                        disqualification_reasons[(s_idx, p_idx)] = reason
+                        continue
 
                 # 4. Profession specific metadata check (e.g. lab capability, semesters)
                 prof_meta = person.get("profession_metadata", {})

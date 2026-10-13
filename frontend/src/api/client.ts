@@ -133,11 +133,17 @@ class ApiClient {
     return this.request<any[]>(`/profiles?${query.toString()}`);
   };
 
+  getPerson = (id: number) =>
+    this.request<any>(`/profiles/${id}`);
+
   createPerson = (data: any) =>
     this.request<any>('/profiles', { method: 'POST', body: JSON.stringify(data) });
 
   updatePerson = (id: number, data: any) =>
     this.request<any>(`/profiles/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+
+  syncTeacherAssignments = (personId: number, assignments: any[]) =>
+    this.request<any>(`/profiles/${personId}/assignments/sync`, { method: 'POST', body: JSON.stringify({ assignments }) });
 
   deletePerson = (id: number) =>
     this.request<any>(`/profiles/${id}`, { method: 'DELETE' });

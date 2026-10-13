@@ -595,6 +595,7 @@ def _format_teacher_assignment(a: TeacherSubjectAssignment) -> Dict[str, Any]:
         "class_name": a.class_name,
         "required_hours": a.required_hours or 4.0,
         "required_periods": getattr(a, "required_periods", 4) or 4,
+        "period_duration": getattr(a, "period_duration", "1 hour") or "1 hour",
         "allowed_working_days": getattr(a, "allowed_working_days", [0, 1, 2, 3, 4]) or [0, 1, 2, 3, 4],
         "preferred_periods": getattr(a, "preferred_periods", []) or [],
         "unavailable_periods": getattr(a, "unavailable_periods", []) or [],
@@ -693,6 +694,7 @@ def create_teacher_assignment(org_id: int, payload: TeacherAssignmentCreate, db:
         class_name=payload.class_name or subject.class_name,
         required_hours=payload.required_hours or subject.required_hours_per_week or 4.0,
         required_periods=payload.required_periods or 4,
+        period_duration=payload.period_duration or "1 hour",
         allowed_working_days=payload.allowed_working_days or [0, 1, 2, 3, 4],
         preferred_periods=payload.preferred_periods or [],
         unavailable_periods=payload.unavailable_periods or [],
@@ -732,6 +734,8 @@ def update_teacher_assignment(org_id: int, assignment_id: int, payload: TeacherA
         assign.required_hours = payload.required_hours
     if payload.required_periods is not None:
         assign.required_periods = payload.required_periods
+    if payload.period_duration is not None:
+        assign.period_duration = payload.period_duration
     if payload.allowed_working_days is not None:
         assign.allowed_working_days = payload.allowed_working_days
     if payload.preferred_periods is not None:

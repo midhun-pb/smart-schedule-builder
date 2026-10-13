@@ -94,7 +94,9 @@ class TeacherSubjectAssignment(Base):
     class_name = Column(String(50), nullable=True) # "S3 A", "S5 CSE-A"
     required_hours = Column(Float, default=4.0)
     required_periods = Column(Integer, default=4)
+    period_duration = Column(String(50), default="1 hour")
     allowed_working_days = Column(JSON, default=lambda: [0, 1, 2, 3, 4])
+
     preferred_periods = Column(JSON, default=list)
     unavailable_periods = Column(JSON, default=list)
     max_periods_per_day = Column(Integer, default=2)
