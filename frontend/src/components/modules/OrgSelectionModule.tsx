@@ -47,6 +47,9 @@ interface Step3AssignmentRow {
   department_id?: number;
   semester: string;
   subject_id?: number;
+  new_subject_name?: string;
+  new_subject_code?: string;
+  is_creating_new?: boolean;
   required_periods: number;
   period_duration: string;
   allowed_working_days: number[];
@@ -171,7 +174,7 @@ export const OrgSelectionModule: React.FC = () => {
   useEffect(() => {
     if (!createdOrgId) return;
 
-    if (currentStep === 2 || currentStep === 3 || currentStep === 4) {
+    if (currentStep === 2 || currentStep === 3) {
       api.getDepartments(createdOrgId).then((depts) => {
         setDepartmentsList(depts || []);
         if (depts && depts.length > 0 && !personDeptId) {
@@ -190,10 +193,7 @@ export const OrgSelectionModule: React.FC = () => {
         }
       }).catch(console.error);
     }
-    if (currentStep === 4) {
-      api.getSubjects(createdOrgId).then(setSubjectsList).catch(console.error);
-    }
-    if (currentStep === 6) {
+    if (currentStep === 5) {
       api.getRosterReadiness(createdOrgId).then(setReadiness).catch(console.error);
     }
   }, [currentStep, createdOrgId]);
@@ -208,7 +208,9 @@ export const OrgSelectionModule: React.FC = () => {
     setOrgCode(org.code || '');
     setOrgDesc(org.description || '');
 
-    const savedStep = org.settings_json?.setup_step || 1;
+    let savedStep = org.settings_json?.setup_step || 1;
+    if (savedStep > 5) savedStep = 5;
+    else if (savedStep === 4 && org.settings_json?.setup_completed) savedStep = 5;
     setCurrentStep(savedStep);
     setViewState('wizard');
     addToast('Resumed Setup', `Continuing configuration for ${org.name} at Step ${savedStep}`, 'info');
@@ -455,6 +457,9 @@ export const OrgSelectionModule: React.FC = () => {
         semester: defaultSem,
         department_id: defaultDept,
         subject_id: undefined,
+        new_subject_name: '',
+        new_subject_code: '',
+        is_creating_new: false,
         required_periods: 4,
         period_duration: '1 hour',
         allowed_working_days: DEFAULT_DAYS,
@@ -482,6 +487,52 @@ export const OrgSelectionModule: React.FC = () => {
       ...prev,
       [index]: !prev[index],
     }));
+  };
+
+  // Create a new subject directly from within a teacher's assignment row
+  const handleCreateSubjectForRow = async (idx: number) => {
+    if (!createdOrgId) return;
+    const row = step3Assignments[idx];
+    const name = row?.new_subject_name?.trim();
+    if (!name) return;
+
+    try {
+      const code =
+        row.new_subject_code?.trim().toUpperCase() ||
+        name.replace(/[^A-Za-z0-9]/g, '').slice(0, 5).toUpperCase() ||
+        'SUB';
+      const deptId = row.department_id || personDeptId || (departmentsList[0]?.id ?? undefined);
+
+      const newSub = await api.createSubject(createdOrgId, {
+        name: name,
+        code: code,
+        department_id: deptId,
+        semester: row.semester || 'S1',
+        required_hours_per_week: row.required_periods || 4,
+        is_lab: false,
+      });
+
+      const updated = await api.getSubjects(createdOrgId);
+      setSubjectsList(updated || []);
+
+      handleUpdateStep3Assignment(idx, {
+        subject_id: newSub.id,
+        new_subject_name: '',
+        new_subject_code: '',
+        is_creating_new: false,
+        required_periods: newSub.required_hours_per_week ? Math.round(newSub.required_hours_per_week) : row.required_periods,
+      });
+
+      addToast(
+        newSub.already_existed ? 'Subject Linked' : 'Subject Created',
+        newSub.already_existed
+          ? `Referencing existing course "${newSub.name}" (${newSub.code})`
+          : `Created "${newSub.name}" and assigned to ${row.semester}`,
+        'success'
+      );
+    } catch (err: any) {
+      addToast('Error', err.message || 'Failed to create subject', 'error');
+    }
   };
 
   // Quick Add Subject directly from Step 3 (shortcut to central curriculum)
@@ -537,6 +588,36 @@ export const OrgSelectionModule: React.FC = () => {
     }
 
     try {
+      // Auto-save any pending newly entered subjects across assignment rows before saving teacher
+      let currentSubs = [...subjectsList];
+      for (let i = 0; i < step3Assignments.length; i++) {
+        const row = step3Assignments[i];
+        if (!row.subject_id && row.new_subject_name?.trim()) {
+          const name = row.new_subject_name.trim();
+          const code =
+            row.new_subject_code?.trim().toUpperCase() ||
+            name.replace(/[^A-Za-z0-9]/g, '').slice(0, 5).toUpperCase() ||
+            'SUB';
+          const deptId = row.department_id || personDeptId || (departmentsList[0]?.id ?? undefined);
+          const newSub = await api.createSubject(createdOrgId, {
+            name: name,
+            code: code,
+            department_id: deptId,
+            semester: row.semester || 'S1',
+            required_hours_per_week: row.required_periods || 4,
+            is_lab: false,
+          });
+          row.subject_id = newSub.id;
+          row.is_creating_new = false;
+          row.new_subject_name = '';
+          row.new_subject_code = '';
+          if (!currentSubs.some((s) => s.id === newSub.id)) {
+            currentSubs.push(newSub);
+          }
+        }
+      }
+      setSubjectsList(currentSubs);
+
       const skillsArray =
         selectedType === 'college'
           ? [{ name: 'Teaching', level: 'Expert', verified: true, years: 5 }]
@@ -544,7 +625,7 @@ export const OrgSelectionModule: React.FC = () => {
 
       // In college mode, automatically include assigned subjects in skills for compatibility
       const assignedSubjIds = step3Assignments.map((a) => a.subject_id).filter(Boolean);
-      const assignedSubjects = subjectsList.filter((s) => assignedSubjIds.includes(s.id));
+      const assignedSubjects = currentSubs.filter((s) => assignedSubjIds.includes(s.id));
       for (const as of assignedSubjects) {
         if (!skillsArray.some((sk) => sk.name.toLowerCase() === as.name.toLowerCase())) {
           skillsArray.push({
@@ -661,6 +742,9 @@ export const OrgSelectionModule: React.FC = () => {
             allowed_working_days: a.allowed_working_days || DEFAULT_DAYS,
             preferred_periods: Array.isArray(a.preferred_periods) ? a.preferred_periods.join(', ') : (a.preferred_periods || ''),
             class_name: a.class_name || '',
+            new_subject_name: '',
+            new_subject_code: '',
+            is_creating_new: false,
           }))
         );
       } else {
@@ -777,7 +861,7 @@ export const OrgSelectionModule: React.FC = () => {
         settings_json: { setup_step: 4 },
       });
     }
-    addToast('Step 3 Complete', 'Teacher assignments saved. Moving to Step 4: Subjects & Duties', 'success');
+    addToast('Step 3 Complete', 'Teacher assignments saved. Moving to Step 4: Working Hours & Shifts', 'success');
     setCurrentStep(4);
   };
 
@@ -910,19 +994,8 @@ export const OrgSelectionModule: React.FC = () => {
     }
   };
 
+  // STEP 4: Save Working Hours & Breaks
   const handleSaveStep4 = async () => {
-    triggerHaptic(15);
-    if (createdOrgId) {
-      await api.updateOrganization(createdOrgId, {
-        settings_json: { setup_step: 5 },
-      });
-    }
-    addToast('Step 4 Complete', 'Curriculum saved. Moving to Step 5: Working Hours & Shifts', 'success');
-    setCurrentStep(5);
-  };
-
-  // STEP 5: Save Working Hours & Breaks
-  const handleSaveStep5 = async () => {
     triggerHaptic(15);
     if (!createdOrgId) return;
 
@@ -931,7 +1004,7 @@ export const OrgSelectionModule: React.FC = () => {
       await api.updateOrganization(createdOrgId, {
         working_days_schedule: schedule,
         settings_json: {
-          setup_step: 6,
+          setup_step: 5,
           working_days: workingDays,
           daily_start_time: dailyStartTime,
           daily_end_time: dailyEndTime,
@@ -943,14 +1016,14 @@ export const OrgSelectionModule: React.FC = () => {
         },
       });
 
-      addToast('Step 5 Complete', 'Shift timing rules saved. Moving to Step 6: Timetable Generation', 'success');
-      setCurrentStep(6);
+      addToast('Step 4 Complete', 'Shift timing rules saved. Moving to Step 5: Timetable Generation', 'success');
+      setCurrentStep(5);
     } catch (err: any) {
       addToast('Error', err.message, 'error');
     }
   };
 
-  // STEP 6: Run Smart Roster Generator & Preview Confirmation
+  // STEP 5: Run Smart Roster Generator & Preview Confirmation
   const handleRunRosterGenerator = async () => {
     if (!createdOrgId) return;
     triggerHaptic(20);
@@ -993,7 +1066,7 @@ export const OrgSelectionModule: React.FC = () => {
     try {
       await api.updateOrganization(createdOrgId, {
         settings_json: {
-          setup_step: 6,
+          setup_step: 5,
           setup_completed: true,
         },
       });
@@ -1011,9 +1084,8 @@ export const OrgSelectionModule: React.FC = () => {
       { num: 1, label: 'Details' },
       { num: 2, label: 'Departments' },
       { num: 3, label: selectedType === 'college' ? 'Teachers' : 'Employees' },
-      { num: 4, label: selectedType === 'college' ? 'Subjects' : 'Duties' },
-      { num: 5, label: 'Working Hours' },
-      { num: 6, label: 'Generate' },
+      { num: 4, label: 'Working Hours' },
+      { num: 5, label: 'Generate' },
     ];
 
     return (
@@ -1025,7 +1097,7 @@ export const OrgSelectionModule: React.FC = () => {
             <button
               key={st.num}
               onClick={() => {
-                if (createdOrgId && st.num <= 6) {
+                if (createdOrgId && st.num <= 5) {
                   triggerHaptic(10);
                   setCurrentStep(st.num);
                 }
@@ -1126,7 +1198,7 @@ export const OrgSelectionModule: React.FC = () => {
                           ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
                           : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20'
                       }`}>
-                        {isSetupDone ? 'Active Timetable' : `Setup Step ${currentStepNum}/6`}
+                        {isSetupDone ? 'Active Timetable' : `Setup Step ${Math.min(currentStepNum, 5)}/5`}
                       </span>
                     </div>
 
@@ -1166,7 +1238,7 @@ export const OrgSelectionModule: React.FC = () => {
         </div>
       )}
 
-      {/* MODE 2: Guided 6-Step Setup Wizard */}
+      {/* MODE 2: Guided 5-Step Setup Wizard */}
       {viewState === 'wizard' && (
         <div className="p-6 md:p-8 rounded-3xl glass-panel border border-white/40 dark:border-white/10 space-y-6">
           {renderStepIndicator()}
@@ -1872,34 +1944,88 @@ export const OrgSelectionModule: React.FC = () => {
 
                                     {/* 3. Subject (Filtered dynamically by department and semester) */}
                                     <div>
-                                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                                        3. Subject *
-                                      </label>
-                                      <select
-                                        required
-                                        value={row.subject_id || ''}
-                                        onChange={(e) => {
-                                          const chosenId = Number(e.target.value) || undefined;
-                                          const chosenSub = subjectsList.find((s) => s.id === chosenId);
-                                          handleUpdateStep3Assignment(idx, {
-                                            subject_id: chosenId,
-                                            required_periods: chosenSub?.required_hours_per_week ? Math.round(chosenSub.required_hours_per_week) : row.required_periods,
-                                          });
-                                        }}
-                                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
-                                      >
-                                        <option value="">-- Select Subject for {row.semester} --</option>
-                                        {rowSemesterSubjects.map((sub) => (
-                                          <option key={sub.id} value={sub.id}>
-                                            {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
-                                          </option>
-                                        ))}
-                                        {rowSemesterSubjects.length === 0 && (
-                                          <option value="" disabled>
-                                            No subjects available for {row.semester}
-                                          </option>
-                                        )}
-                                      </select>
+                                      <div className="flex items-center justify-between mb-1">
+                                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                                          3. Subject *
+                                        </label>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleUpdateStep3Assignment(idx, {
+                                              is_creating_new: !row.is_creating_new,
+                                            })
+                                          }
+                                          className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline font-bold flex items-center gap-1"
+                                        >
+                                          <Plus className="w-3 h-3" />
+                                          <span>{row.is_creating_new ? 'Choose Existing' : '+ New Subject'}</span>
+                                        </button>
+                                      </div>
+
+                                      {!row.is_creating_new ? (
+                                        <select
+                                          required={!row.new_subject_name}
+                                          value={row.subject_id || ''}
+                                          onChange={(e) => {
+                                            const val = e.target.value;
+                                            if (val === '__new__') {
+                                              handleUpdateStep3Assignment(idx, {
+                                                is_creating_new: true,
+                                                subject_id: undefined,
+                                              });
+                                            } else {
+                                              const chosenId = Number(val) || undefined;
+                                              const chosenSub = subjectsList.find((s) => s.id === chosenId);
+                                              handleUpdateStep3Assignment(idx, {
+                                                subject_id: chosenId,
+                                                required_periods: chosenSub?.required_hours_per_week
+                                                  ? Math.round(chosenSub.required_hours_per_week)
+                                                  : row.required_periods,
+                                              });
+                                            }
+                                          }}
+                                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
+                                        >
+                                          <option value="">-- Select Subject for {row.semester} --</option>
+                                          {rowSemesterSubjects.map((sub) => (
+                                            <option key={sub.id} value={sub.id}>
+                                              {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
+                                            </option>
+                                          ))}
+                                          <option value="__new__">+ Create new subject for {row.semester}...</option>
+                                        </select>
+                                      ) : (
+                                        <div className="p-2.5 rounded-xl bg-blue-500/10 border border-blue-500/20 space-y-2">
+                                          <div className="flex flex-col sm:flex-row items-center gap-2">
+                                            <input
+                                              type="text"
+                                              placeholder={`Subject name for ${row.semester}...`}
+                                              value={row.new_subject_name || ''}
+                                              onChange={(e) =>
+                                                handleUpdateStep3Assignment(idx, { new_subject_name: e.target.value })
+                                              }
+                                              className="w-full sm:flex-1 px-3 py-1.5 rounded-lg glass-input text-xs font-semibold"
+                                            />
+                                            <input
+                                              type="text"
+                                              placeholder="Code (opt)"
+                                              value={row.new_subject_code || ''}
+                                              onChange={(e) =>
+                                                handleUpdateStep3Assignment(idx, { new_subject_code: e.target.value })
+                                              }
+                                              className="w-full sm:w-20 px-2.5 py-1.5 rounded-lg glass-input text-xs uppercase"
+                                            />
+                                            <button
+                                              type="button"
+                                              onClick={() => handleCreateSubjectForRow(idx)}
+                                              disabled={!row.new_subject_name?.trim()}
+                                              className="px-3 py-1.5 rounded-lg glass-button-primary text-xs font-bold whitespace-nowrap w-full sm:w-auto"
+                                            >
+                                              Save & Select
+                                            </button>
+                                          </div>
+                                        </div>
+                                      )}
                                     </div>
 
                                     {/* 4. Required Periods/Wk */}
@@ -2163,251 +2289,6 @@ export const OrgSelectionModule: React.FC = () => {
                   onClick={handleSaveStep3}
                   className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-2 shadow-lg shadow-blue-500/20"
                 >
-                  <span>Save & Continue to {selectedType === 'college' ? 'Subjects' : 'Duties'}</span>
-                  <ArrowRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ============================================================== */}
-          {/* STEP 4: SUBJECTS, DUTIES, AND REQUIREMENTS                     */}
-          {/* ============================================================== */}
-          {currentStep === 4 && (
-            <div className="space-y-6 animate-in fade-in duration-200">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                    Step 4: {selectedType === 'college' ? 'Subjects & Academic Curriculum' : 'Operational Duties & Tasks'}
-                  </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {selectedType === 'college'
-                      ? 'Configure course subjects, semester codes, sections, and practical lab designations.'
-                      : 'Define shift requirements, necessary competencies, and operational task roles.'}
-                  </p>
-                </div>
-                {selectedType === 'college' && subjectsList.length === 0 && (
-                  <button
-                    onClick={handleSeedDefaultSubjects}
-                    className="px-3 py-1.5 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20 text-xs font-semibold flex items-center gap-1.5"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Add Sample Curriculum</span>
-                  </button>
-                )}
-              </div>
-
-              {/* Add / Edit Subject Form */}
-              {selectedType === 'college' ? (
-                <div className="p-5 rounded-2xl glass-card border border-white/40 dark:border-white/10 space-y-4">
-                  {editingSubjectId && (
-                    <div className="p-3.5 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-between text-xs text-blue-700 dark:text-blue-300">
-                      <div className="flex items-center gap-2 font-bold">
-                        <Edit2 className="w-4 h-4 text-blue-600" />
-                        <span>Editing Course: {subName} {subCode ? `(${subCode})` : ''}</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleCancelEditSubject}
-                        className="px-2.5 py-1 rounded-lg bg-white/60 dark:bg-slate-800/60 hover:bg-white text-slate-700 dark:text-slate-200 text-xs font-semibold transition-all"
-                      >
-                        Cancel Edit
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="font-bold text-xs text-slate-700 dark:text-slate-300">
-                    {editingSubjectId ? 'Update Academic Course / Subject' : 'Add Academic Course / Subject'}
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                    <div className="md:col-span-2">
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Subject Title *</label>
-                      <input
-                        type="text"
-                        value={subName}
-                        onChange={(e) => setSubName(e.target.value)}
-                        placeholder="e.g. Database Management Systems"
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Course Code</label>
-                      <input
-                        type="text"
-                        value={subCode}
-                        onChange={(e) => setSubCode(e.target.value)}
-                        placeholder="CS301"
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs uppercase"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Department</label>
-                      <select
-                        value={subDeptId || ''}
-                        onChange={(e) => setSubDeptId(e.target.value ? Number(e.target.value) : undefined)}
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      >
-                        <option value="">General</option>
-                        {departmentsList.map((d) => (
-                          <option key={d.id} value={d.id}>{d.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-center">
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Semester *</label>
-                      <select
-                        value={subSemester}
-                        onChange={(e) => setSubSemester(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
-                      >
-                        {semestersList.map((sem) => (
-                          <option key={sem.id} value={sem.code}>
-                            {sem.code} ({sem.name})
-                          </option>
-                        ))}
-                        {semestersList.length === 0 &&
-                          ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'].map((s) => (
-                            <option key={s} value={s}>
-                              {s}
-                            </option>
-                          ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Class / Section</label>
-                      <input
-                        type="text"
-                        value={subClass}
-                        onChange={(e) => setSubClass(e.target.value)}
-                        placeholder="CSE-A"
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Weekly Periods</label>
-                      <input
-                        type="number"
-                        value={subHours}
-                        onChange={(e) => setSubHours(Number(e.target.value))}
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
-                    </div>
-                    <div className="flex items-center gap-2 pt-4">
-                      <input
-                        type="checkbox"
-                        id="isLabCheck"
-                        checked={subIsLab}
-                        onChange={(e) => setSubIsLab(e.target.checked)}
-                        className="rounded"
-                      />
-                      <label htmlFor="isLabCheck" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                        Is Practical Laboratory
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="flex justify-end gap-2">
-                    {editingSubjectId && (
-                      <button
-                        type="button"
-                        onClick={handleCancelEditSubject}
-                        className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold"
-                      >
-                        Cancel
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleAddOrUpdateSubject}
-                      className="px-4 py-2 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-1.5"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>{editingSubjectId ? 'Update Subject' : 'Add Subject'}</span>
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-5 rounded-2xl glass-card border border-white/40 dark:border-white/10 text-xs text-slate-500">
-                  Operational duties and roles will automatically be generated from your configured shift requirements in Step 5.
-                </div>
-              )}
-
-              {/* Subject List */}
-              {selectedType === 'college' && (
-                <div className="space-y-2">
-                  <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                    Configured Subjects ({subjectsList.length})
-                  </div>
-                  {subjectsList.length === 0 ? (
-                    <div className="p-6 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 text-center text-xs text-slate-400">
-                      No subjects configured yet. Click 'Add Sample Curriculum' above to get started quickly.
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                      {subjectsList.map((s) => (
-                        <div
-                          key={s.id}
-                          className="p-3 rounded-xl glass-card border border-white/40 dark:border-white/10 flex items-center justify-between text-xs"
-                        >
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-slate-900 dark:text-white">{s.name}</span>
-                              <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 font-bold text-[10px]">
-                                {s.code}
-                              </span>
-                              {s.is_lab && (
-                                <span className="px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-600 font-bold text-[10px]">
-                                  LAB
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] text-slate-500 mt-0.5">
-                              {s.semester || 'S1'} • {s.required_hours_per_week || 4} periods/wk • {s.department_name || 'General'}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => handleStartEditSubject(s)}
-                              className="p-1.5 rounded-lg hover:bg-blue-500/10 text-slate-400 hover:text-blue-500 transition-colors"
-                              title="Edit Subject"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteSubject(s.id)}
-                              className="p-1.5 rounded-lg hover:bg-red-500/10 text-slate-400 hover:text-red-500 transition-colors"
-                              title="Delete Subject"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Step 4 Actions */}
-              <div className="pt-4 border-t border-white/20 dark:border-white/10 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => setCurrentStep(3)}
-                  className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold flex items-center gap-1"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                  <span>Back</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSaveStep4}
-                  className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-2 shadow-lg shadow-blue-500/20"
-                >
                   <span>Save & Continue to Working Hours</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
@@ -2415,13 +2296,15 @@ export const OrgSelectionModule: React.FC = () => {
             </div>
           )}
 
+
+
           {/* ============================================================== */}
-          {/* STEP 5: TIMETABLE CONFIGURATION & BREAKS                       */}
+          {/* STEP 4: TIMETABLE CONFIGURATION & BREAKS                       */}
           {/* ============================================================== */}
-          {currentStep === 5 && (
+          {currentStep === 4 && (
             <div className="space-y-6 animate-in fade-in duration-200">
               <div>
-                <h2 className="text-lg font-bold text-slate-900 dark:text-white">Step 5: Timetable Configuration & Shift Rules</h2>
+                <h2 className="text-lg font-bold text-slate-900 dark:text-white">Step 4: Timetable Configuration & Shift Rules</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Configure daily lecture durations, designated lunch/refreshment breaks, and minimum rest periods.
                 </p>
@@ -2511,19 +2394,19 @@ export const OrgSelectionModule: React.FC = () => {
                 </div>
               </div>
 
-              {/* Step 5 Actions */}
+              {/* Step 4 Actions */}
               <div className="pt-4 border-t border-white/20 dark:border-white/10 flex items-center justify-between">
                 <button
                   type="button"
-                  onClick={() => setCurrentStep(4)}
+                  onClick={() => setCurrentStep(3)}
                   className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold flex items-center gap-1"
                 >
                   <ChevronLeft className="w-4 h-4" />
-                  <span>Back</span>
+                  <span>Back to Teachers</span>
                 </button>
                 <button
                   type="button"
-                  onClick={handleSaveStep5}
+                  onClick={handleSaveStep4}
                   className="px-5 py-2.5 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-2 shadow-lg shadow-blue-500/20"
                 >
                   <span>Save & Continue to Generation</span>
@@ -2534,12 +2417,12 @@ export const OrgSelectionModule: React.FC = () => {
           )}
 
           {/* ============================================================== */}
-          {/* STEP 6: GENERATE TIMETABLE                                     */}
+          {/* STEP 5: GENERATE TIMETABLE                                     */}
           {/* ============================================================== */}
-          {currentStep === 6 && (
+          {currentStep === 5 && (
             <div className="space-y-6 animate-in fade-in duration-200">
               <div>
-                <h2 className="text-lg font-bold text-slate-900 dark:text-white">Step 6: Smart Roster Generator</h2>
+                <h2 className="text-lg font-bold text-slate-900 dark:text-white">Step 5: Review & GLIXON Timetable Generation</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Verify configuration completeness and run the automated constraint satisfaction optimizer.
                 </p>
@@ -2681,11 +2564,11 @@ export const OrgSelectionModule: React.FC = () => {
                 </div>
               )}
 
-              {/* Step 6 Bottom Navigation */}
+              {/* Step 5 Bottom Navigation */}
               <div className="pt-4 border-t border-white/20 dark:border-white/10 flex items-center justify-between">
                 <button
                   type="button"
-                  onClick={() => setCurrentStep(5)}
+                  onClick={() => setCurrentStep(4)}
                   className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold flex items-center gap-1"
                 >
                   <ChevronLeft className="w-4 h-4" />

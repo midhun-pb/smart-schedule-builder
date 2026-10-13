@@ -1096,6 +1096,7 @@ def get_roster_readiness(org_id: int, db: Session = Depends(get_db)):
     people_count = db.query(Person).filter(Person.org_id == org_id, Person.status == "active").count()
     dept_count = db.query(Department).filter(Department.org_id == org_id).count()
     subjects_count = db.query(Subject).filter(Subject.org_id == org_id).count()
+    tsa_count = db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == org_id).count()
 
     settings = org.settings_json or {}
     sched_config = settings.get("working_days_schedule", {})
@@ -1128,9 +1129,9 @@ def get_roster_readiness(org_id: int, db: Session = Depends(get_db)):
         },
         {
             "key": "subjects_duties",
-            "title": "Subjects & Curriculum Configured" if org.type in ["college", "university"] else "Duties & Roles Defined",
-            "is_ready": (subjects_count > 0) if org.type in ["college", "university"] else True,
-            "details": f"{subjects_count} subject(s) configured" if org.type in ["college", "university"] else "Operating duties mapped"
+            "title": "Subjects Assigned to Teachers" if org.type in ["college", "university"] else "Duties & Roles Defined",
+            "is_ready": (tsa_count > 0 or subjects_count > 0) if org.type in ["college", "university"] else True,
+            "details": f"{tsa_count} teacher subject assignment(s) configured" if org.type in ["college", "university"] and tsa_count > 0 else (f"{subjects_count} subject(s) configured" if org.type in ["college", "university"] else "Operating duties mapped")
         },
         {
             "key": "working_hours",
@@ -1156,7 +1157,7 @@ def get_roster_readiness(org_id: int, db: Session = Depends(get_db)):
         "checklist": checklist,
         "missing_items": missing_items,
         "latest_schedule_id": latest_sched.id if latest_sched else None,
-        "setup_step": settings.get("setup_step", 6 if can_generate else 1),
+        "setup_step": settings.get("setup_step", 5 if can_generate else 1),
         "setup_completed": settings.get("setup_completed", False)
     }
 

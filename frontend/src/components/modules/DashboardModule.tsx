@@ -99,7 +99,7 @@ export const DashboardModule: React.FC = () => {
             </div>
             <div>
               <div className="text-xs font-bold text-amber-900 dark:text-amber-200">
-                Setup In Progress: Step {setupStep} of 6
+                Setup In Progress: Step {Math.min(setupStep, 5)} of 5
               </div>
               <div className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
                 {activeOrg?.name} is partially configured. Continue through the simple setup wizard to complete timetable generation.

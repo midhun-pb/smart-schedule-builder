@@ -35,6 +35,9 @@ interface FormAssignmentRow {
   id?: number;
   semester: string;
   subject_id?: number;
+  new_subject_name?: string;
+  new_subject_code?: string;
+  is_creating_new?: boolean;
   required_periods: number;
   period_duration: string;
   allowed_working_days: number[];
@@ -175,6 +178,9 @@ export const ProfilesModule: React.FC = () => {
         id: a.id,
         semester: a.semester || (sems && sems[0] ? sems[0].code : 'S1'),
         subject_id: a.subject_id,
+        new_subject_name: '',
+        new_subject_code: '',
+        is_creating_new: false,
         required_periods: a.required_periods || 4,
         period_duration: a.period_duration || '1 hour',
         allowed_working_days: a.allowed_working_days || DEFAULT_DAYS,
@@ -211,6 +217,9 @@ export const ProfilesModule: React.FC = () => {
       {
         semester: defaultSem,
         subject_id: undefined,
+        new_subject_name: '',
+        new_subject_code: '',
+        is_creating_new: false,
         required_periods: 4,
         period_duration: '1 hour',
         allowed_working_days: DEFAULT_DAYS,
@@ -233,6 +242,33 @@ export const ProfilesModule: React.FC = () => {
     setFormAssignments((prev) => prev.filter((_, idx) => idx !== index));
   };
 
+  const handleCreateSubjectForFormRow = async (idx: number) => {
+    const row = formAssignments[idx];
+    if (!activeOrg || !row || !row.new_subject_name?.trim()) return;
+    try {
+      const created = await api.createSubject(activeOrg.id, {
+        name: row.new_subject_name.trim(),
+        code: row.new_subject_code?.trim() || undefined,
+        semester: row.semester || 'S1',
+        department_id: formDeptId || undefined,
+        required_hours_per_week: row.required_periods || 4,
+      });
+      setSubjectsList((prev) => {
+        if (prev.some((s) => s.id === created.id)) return prev;
+        return [...prev, created];
+      });
+      handleUpdateFormAssignment(idx, {
+        subject_id: created.id,
+        is_creating_new: false,
+        new_subject_name: '',
+        new_subject_code: '',
+      });
+      addToast('Subject Created', `Added "${created.name}" for ${row.semester}`, 'success');
+    } catch (err: any) {
+      addToast('Failed to create subject', err.message || 'Error creating subject', 'error');
+    }
+  };
+
   // Handlers for Edit Modal Assignment Rows
   const handleAddEditAssignment = () => {
     triggerHaptic(10);
@@ -242,6 +278,9 @@ export const ProfilesModule: React.FC = () => {
       {
         semester: defaultSem,
         subject_id: undefined,
+        new_subject_name: '',
+        new_subject_code: '',
+        is_creating_new: false,
         required_periods: 4,
         period_duration: '1 hour',
         allowed_working_days: DEFAULT_DAYS,
@@ -264,6 +303,33 @@ export const ProfilesModule: React.FC = () => {
     setEditAssignments((prev) => prev.filter((_, idx) => idx !== index));
   };
 
+  const handleCreateSubjectForEditRow = async (idx: number) => {
+    const row = editAssignments[idx];
+    if (!activeOrg || !row || !row.new_subject_name?.trim()) return;
+    try {
+      const created = await api.createSubject(activeOrg.id, {
+        name: row.new_subject_name.trim(),
+        code: row.new_subject_code?.trim() || undefined,
+        semester: row.semester || 'S1',
+        department_id: editDeptId || undefined,
+        required_hours_per_week: row.required_periods || 4,
+      });
+      setSubjectsList((prev) => {
+        if (prev.some((s) => s.id === created.id)) return prev;
+        return [...prev, created];
+      });
+      handleUpdateEditAssignment(idx, {
+        subject_id: created.id,
+        is_creating_new: false,
+        new_subject_name: '',
+        new_subject_code: '',
+      });
+      addToast('Subject Created', `Added "${created.name}" for ${row.semester}`, 'success');
+    } catch (err: any) {
+      addToast('Failed to create subject', err.message || 'Error creating subject', 'error');
+    }
+  };
+
   // Submit Create Teacher + Assignments
   const handleCreateTeacher = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -276,6 +342,35 @@ export const ProfilesModule: React.FC = () => {
     setIsLoading(true);
 
     try {
+      // Auto-create any pending new subjects first
+      let currentSubjects = [...subjectsList];
+      const updatedRows = [...formAssignments];
+      for (let i = 0; i < updatedRows.length; i++) {
+        const r = updatedRows[i];
+        if (!r.subject_id && r.new_subject_name?.trim()) {
+          try {
+            const created = await api.createSubject(activeOrg.id, {
+              name: r.new_subject_name.trim(),
+              code: r.new_subject_code?.trim() || undefined,
+              semester: r.semester || 'S1',
+              department_id: formDeptId || undefined,
+              required_hours_per_week: r.required_periods || 4,
+            });
+            if (!currentSubjects.some((s) => s.id === created.id)) {
+              currentSubjects.push(created);
+            }
+            updatedRows[i] = {
+              ...r,
+              subject_id: created.id,
+              is_creating_new: false,
+            };
+          } catch (subErr) {
+            console.warn('Failed to auto-create subject:', subErr);
+          }
+        }
+      }
+      setSubjectsList(currentSubjects);
+
       const skillsArray = formSkillsStr
         ? formSkillsStr
             .split(',')
@@ -290,8 +385,8 @@ export const ProfilesModule: React.FC = () => {
         : [];
 
       // Automatically add selected subjects to skills array for seamless compatibility
-      const assignedSubjIds = formAssignments.map((a) => a.subject_id).filter(Boolean);
-      const assignedSubjects = subjectsList.filter((s) => assignedSubjIds.includes(s.id));
+      const assignedSubjIds = updatedRows.map((a) => a.subject_id).filter(Boolean);
+      const assignedSubjects = currentSubjects.filter((s) => assignedSubjIds.includes(s.id));
       for (const as of assignedSubjects) {
         if (!skillsArray.some((sk) => sk.name.toLowerCase() === as.name.toLowerCase())) {
           skillsArray.push({
@@ -308,10 +403,10 @@ export const ProfilesModule: React.FC = () => {
         : [];
 
       // Build assignments payload
-      const assignmentsPayload = formAssignments
+      const assignmentsPayload = updatedRows
         .filter((r) => r.subject_id)
         .map((r) => {
-          const sub = subjectsList.find((s) => s.id === r.subject_id);
+          const sub = currentSubjects.find((s) => s.id === r.subject_id);
           const semObj = semestersList.find((s) => s.code === r.semester);
           const prefList = r.preferred_periods
             ? r.preferred_periods.split(',').map((p) => p.trim()).filter(Boolean)
@@ -347,7 +442,7 @@ export const ProfilesModule: React.FC = () => {
         skills: skillsArray,
         max_hours_per_week: formHoursLimit || 40,
         profession_metadata: {
-          semesters: Array.from(new Set(formAssignments.map((a) => a.semester).filter(Boolean))),
+          semesters: Array.from(new Set(updatedRows.map((a) => a.semester).filter(Boolean))),
           theory_lab: formTheoryLab,
         },
         status: 'active',
@@ -386,15 +481,44 @@ export const ProfilesModule: React.FC = () => {
     setIsSavingTeacher(true);
 
     try {
+      // Auto-create any pending new subjects first
+      let currentSubjects = [...subjectsList];
+      const updatedRows = [...editAssignments];
+      for (let i = 0; i < updatedRows.length; i++) {
+        const r = updatedRows[i];
+        if (!r.subject_id && r.new_subject_name?.trim()) {
+          try {
+            const created = await api.createSubject(activeOrg.id, {
+              name: r.new_subject_name.trim(),
+              code: r.new_subject_code?.trim() || undefined,
+              semester: r.semester || 'S1',
+              department_id: editDeptId || undefined,
+              required_hours_per_week: r.required_periods || 4,
+            });
+            if (!currentSubjects.some((s) => s.id === created.id)) {
+              currentSubjects.push(created);
+            }
+            updatedRows[i] = {
+              ...r,
+              subject_id: created.id,
+              is_creating_new: false,
+            };
+          } catch (subErr) {
+            console.warn('Failed to auto-create subject in edit modal:', subErr);
+          }
+        }
+      }
+      setSubjectsList(currentSubjects);
+
       const qualsArray = editQualsStr
         ? editQualsStr.split(',').map((q) => q.trim()).filter(Boolean)
         : [];
 
       // Build updated assignments payload
-      const assignmentsPayload = editAssignments
+      const assignmentsPayload = updatedRows
         .filter((r) => r.subject_id)
         .map((r) => {
-          const sub = subjectsList.find((s) => s.id === r.subject_id);
+          const sub = currentSubjects.find((s) => s.id === r.subject_id);
           const semObj = semestersList.find((s) => s.code === r.semester);
           const prefList = r.preferred_periods
             ? r.preferred_periods.split(',').map((p) => p.trim()).filter(Boolean)
@@ -430,7 +554,7 @@ export const ProfilesModule: React.FC = () => {
         status: selectedPerson.status || 'active',
         profession_metadata: {
           ...(selectedPerson.profession_metadata || {}),
-          semesters: Array.from(new Set(editAssignments.map((a) => a.semester).filter(Boolean))),
+          semesters: Array.from(new Set(updatedRows.map((a) => a.semester).filter(Boolean))),
         },
         teacher_assignments: assignmentsPayload,
       });
@@ -939,34 +1063,81 @@ export const ProfilesModule: React.FC = () => {
 
                         {/* 2. Subject (Filtered dynamically by this row's semester) */}
                         <div className="sm:col-span-2 md:col-span-2">
-                          <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                            2. Subject *
-                          </label>
-                          <select
-                            required
-                            value={row.subject_id || ''}
-                            onChange={(e) => {
-                              const chosenId = Number(e.target.value) || undefined;
-                              const chosenSub = subjectsList.find((s) => s.id === chosenId);
-                              handleUpdateFormAssignment(idx, {
-                                subject_id: chosenId,
-                                required_periods: chosenSub?.required_hours_per_week ? Math.round(chosenSub.required_hours_per_week) : row.required_periods,
-                              });
-                            }}
-                            className="w-full px-3 py-2 rounded-xl glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
-                          >
-                            <option value="">-- Select Subject for {row.semester} --</option>
-                            {rowSemesterSubjects.map((sub) => (
-                              <option key={sub.id} value={sub.id}>
-                                {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
-                              </option>
-                            ))}
-                            {rowSemesterSubjects.length === 0 && (
-                              <option value="" disabled>
-                                No subjects available for this semester
-                              </option>
-                            )}
-                          </select>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                              2. Subject *
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateFormAssignment(idx, {
+                                  is_creating_new: !row.is_creating_new,
+                                  subject_id: row.is_creating_new ? row.subject_id : undefined,
+                                })
+                              }
+                              className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                            >
+                              {row.is_creating_new ? '← Choose Existing' : '+ New Subject'}
+                            </button>
+                          </div>
+
+                          {row.is_creating_new ? (
+                            <div className="flex gap-2 items-center">
+                              <input
+                                type="text"
+                                placeholder="Subject Name (e.g. Data Structures)"
+                                value={row.new_subject_name || ''}
+                                onChange={(e) =>
+                                  handleUpdateFormAssignment(idx, { new_subject_name: e.target.value })
+                                }
+                                className="flex-1 px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                                required
+                              />
+                              <input
+                                type="text"
+                                placeholder="Code (e.g. CS301)"
+                                value={row.new_subject_code || ''}
+                                onChange={(e) =>
+                                  handleUpdateFormAssignment(idx, { new_subject_code: e.target.value.toUpperCase() })
+                                }
+                                className="w-24 px-2 py-2 rounded-xl glass-input text-xs font-semibold uppercase"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleCreateSubjectForFormRow(idx)}
+                                disabled={!row.new_subject_name?.trim()}
+                                className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition"
+                              >
+                                Save
+                              </button>
+                            </div>
+                          ) : (
+                            <select
+                              required
+                              value={row.subject_id || ''}
+                              onChange={(e) => {
+                                if (e.target.value === '__new__') {
+                                  handleUpdateFormAssignment(idx, { is_creating_new: true, subject_id: undefined });
+                                  return;
+                                }
+                                const chosenId = Number(e.target.value) || undefined;
+                                const chosenSub = subjectsList.find((s) => s.id === chosenId);
+                                handleUpdateFormAssignment(idx, {
+                                  subject_id: chosenId,
+                                  required_periods: chosenSub?.required_hours_per_week ? Math.round(chosenSub.required_hours_per_week) : row.required_periods,
+                                });
+                              }}
+                              className="w-full px-3 py-2 rounded-xl glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
+                            >
+                              <option value="">-- Select Subject for {row.semester} --</option>
+                              {rowSemesterSubjects.map((sub) => (
+                                <option key={sub.id} value={sub.id}>
+                                  {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
+                                </option>
+                              ))}
+                              <option value="__new__">+ Create new subject...</option>
+                            </select>
+                          )}
                         </div>
 
                         {/* 3. Required periods per week */}
@@ -1466,31 +1637,77 @@ export const ProfilesModule: React.FC = () => {
                               </div>
 
                               <div className="sm:col-span-2">
-                                <label className="block text-[10px] font-bold text-slate-500 mb-1">Subject</label>
-                                <select
-                                  value={row.subject_id || ''}
-                                  onChange={(e) => {
-                                    const chosenId = Number(e.target.value) || undefined;
-                                    const chosenSub = subjectsList.find((s) => s.id === chosenId);
-                                    handleUpdateEditAssignment(idx, {
-                                      subject_id: chosenId,
-                                      required_periods: chosenSub?.required_hours_per_week ? Math.round(chosenSub.required_hours_per_week) : row.required_periods,
-                                    });
-                                  }}
-                                  className="w-full px-2.5 py-1.5 rounded-lg glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
-                                >
-                                  <option value="">-- Choose Subject --</option>
-                                  {rowSubjects.map((sub) => (
-                                    <option key={sub.id} value={sub.id}>
-                                      {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
-                                    </option>
-                                  ))}
-                                  {rowSubjects.length === 0 && (
-                                    <option value="" disabled>
-                                      No subjects available for this semester
-                                    </option>
-                                  )}
-                                </select>
+                                <div className="flex items-center justify-between mb-1">
+                                  <label className="text-[10px] font-bold text-slate-500">Subject *</label>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleUpdateEditAssignment(idx, {
+                                        is_creating_new: !row.is_creating_new,
+                                        subject_id: row.is_creating_new ? row.subject_id : undefined,
+                                      })
+                                    }
+                                    className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                                  >
+                                    {row.is_creating_new ? '← Choose Existing' : '+ New Subject'}
+                                  </button>
+                                </div>
+                                {row.is_creating_new ? (
+                                  <div className="flex gap-1.5 items-center">
+                                    <input
+                                      type="text"
+                                      placeholder="Subject Name"
+                                      value={row.new_subject_name || ''}
+                                      onChange={(e) =>
+                                        handleUpdateEditAssignment(idx, { new_subject_name: e.target.value })
+                                      }
+                                      className="flex-1 px-2.5 py-1.5 rounded-lg glass-input text-xs font-semibold"
+                                      required
+                                    />
+                                    <input
+                                      type="text"
+                                      placeholder="Code"
+                                      value={row.new_subject_code || ''}
+                                      onChange={(e) =>
+                                        handleUpdateEditAssignment(idx, { new_subject_code: e.target.value.toUpperCase() })
+                                      }
+                                      className="w-20 px-2 py-1.5 rounded-lg glass-input text-xs font-semibold uppercase"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCreateSubjectForEditRow(idx)}
+                                      disabled={!row.new_subject_name?.trim()}
+                                      className="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition"
+                                    >
+                                      Save
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <select
+                                    value={row.subject_id || ''}
+                                    onChange={(e) => {
+                                      if (e.target.value === '__new__') {
+                                        handleUpdateEditAssignment(idx, { is_creating_new: true, subject_id: undefined });
+                                        return;
+                                      }
+                                      const chosenId = Number(e.target.value) || undefined;
+                                      const chosenSub = subjectsList.find((s) => s.id === chosenId);
+                                      handleUpdateEditAssignment(idx, {
+                                        subject_id: chosenId,
+                                        required_periods: chosenSub?.required_hours_per_week ? Math.round(chosenSub.required_hours_per_week) : row.required_periods,
+                                      });
+                                    }}
+                                    className="w-full px-2.5 py-1.5 rounded-lg glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
+                                  >
+                                    <option value="">-- Choose Subject --</option>
+                                    {rowSubjects.map((sub) => (
+                                      <option key={sub.id} value={sub.id}>
+                                        {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
+                                      </option>
+                                    ))}
+                                    <option value="__new__">+ Create new subject...</option>
+                                  </select>
+                                )}
                               </div>
 
                               <div>

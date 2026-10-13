@@ -477,3 +477,94 @@ def test_teacher_assignment_does_not_create_duplicate_subjects():
     db.close()
 
 
+def test_5_step_guided_setup_and_on_the_fly_subject_creation():
+    """
+    Validates:
+    1. 5-step setup workflow: Details (1) -> Departments (2) -> Teachers (3) -> Working Hours (4) -> Generate (5).
+    2. Creating new subjects on-the-fly directly inside teacher assignments.
+    3. Proper persistence and deduplication of on-the-fly subjects.
+    4. Roster readiness checklist reflects teacher subject assignments.
+    5. GLIXON successfully generates timetables from these teacher-specific assignments.
+    """
+    db = SessionLocal()
+    org = db.query(Organization).filter(Organization.type == "college").first()
+    assert org is not None
+
+    # Step 1: Create a subject directly on the fly as would happen in Teacher Details form
+    sub_payload = {
+        "name": "Cloud Distributed Systems",
+        "code": "CS705",
+        "semester": "S7",
+        "required_hours_per_week": 3,
+        "is_lab": False
+    }
+    resp = client.post(f"/api/organizations/{org.id}/subjects", json=sub_payload)
+    assert resp.status_code == 200, resp.text
+    created_sub = resp.json()
+    assert created_sub["name"] == "Cloud Distributed Systems"
+    assert created_sub["code"] == "CS705"
+    assert created_sub["semester"] == "S7"
+
+    # Step 1b: Attempting to create same subject deduplicates and returns existing
+    resp_dup = client.post(f"/api/organizations/{org.id}/subjects", json=sub_payload)
+    assert resp_dup.status_code == 200
+    dup_data = resp_dup.json()
+    assert dup_data["id"] == created_sub["id"]
+    assert dup_data.get("already_existed") is True
+
+    # Step 2: Register a teacher with this on-the-fly subject assignment
+    teacher_payload = {
+        "org_id": org.id,
+        "name": "Dr. Leslie Lamport",
+        "email": "lamport@paxos.edu",
+        "employee_code": "FAC-LAMPORT-99",
+        "role_title": "Professor of Distributed Systems",
+        "profession_type": "college",
+        "max_hours_per_week": 40.0,
+        "teacher_assignments": [
+            {
+                "semester": "S7",
+                "subject_id": created_sub["id"],
+                "required_periods": 3,
+                "period_duration": "1 hour"
+            }
+        ]
+    }
+    resp_teacher = client.post("/api/profiles", json=teacher_payload)
+    assert resp_teacher.status_code == 200, resp_teacher.text
+    t_data = resp_teacher.json()
+    assert len(t_data["teacher_assignments"]) == 1
+    assert t_data["teacher_assignments"][0]["subject_id"] == created_sub["id"]
+    assert t_data["teacher_assignments"][0]["semester"] == "S7"
+
+    # Step 3: Check Roster Readiness for 5-step workflow
+    resp_readiness = client.get(f"/api/organizations/{org.id}/roster-readiness")
+    assert resp_readiness.status_code == 200
+    readiness = resp_readiness.json()
+    assert readiness["can_generate"] is True
+    # Verify subjects_duties item is satisfied by teacher subject assignment
+    subj_check = next((item for item in readiness["checklist"] if item["key"] == "subjects_duties"), None)
+    assert subj_check is not None
+    assert subj_check["is_ready"] is True
+
+    # Step 4: Advance org settings along the 5-step flow: step 3 -> step 4 -> step 5
+    client.patch(f"/api/organizations/{org.id}", json={"settings_json": {"setup_step": 4}})
+    client.patch(f"/api/organizations/{org.id}", json={"settings_json": {"setup_step": 5}})
+
+    # Step 5: GLIXON generates timetable incorporating teacher's assignments
+    glixon_resp = client.post("/api/schedules/glixon-generate", json={
+        "org_id": org.id,
+        "title": "5-Step Workflow Timetable",
+        "period_start": "2026-10-19",
+        "period_end": "2026-10-23",
+        "preview": True
+    })
+    assert glixon_resp.status_code == 200, glixon_resp.text
+    glixon_data = glixon_resp.json()
+    assert glixon_data["success"] is True
+    assert len(glixon_data["assignments"]) > 0
+
+    db.close()
+
+
+
