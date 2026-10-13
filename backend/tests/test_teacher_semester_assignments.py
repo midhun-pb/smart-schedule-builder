@@ -1,4 +1,5 @@
 import pytest
+from uuid import uuid4
 from fastapi.testclient import TestClient
 from app.main import app, seed_database, seed_subjects_if_needed
 from app.core.database import SessionLocal
@@ -284,4 +285,195 @@ def test_wizard_step3_teacher_with_three_semesters_persistence():
     assert new_by_sem["S7"]["period_duration"] == "1.5 hours"
 
     db.close()
+
+
+def test_subject_creation_deduplication():
+    """
+    Verify that calling POST /api/organizations/{org_id}/subjects with an existing
+    code or (name, semester) returns the existing subject without creating duplicate DB rows.
+    """
+    db = SessionLocal()
+    org = db.query(Organization).filter(Organization.type == "college").first()
+    assert org is not None
+
+    subs = db.query(Subject).filter(Subject.org_id == org.id).all()
+    assert len(subs) > 0
+    target_sub = subs[0]
+    initial_count = len(subs)
+
+    # 1. Attempt to create subject with the same code
+    dup_payload_code = {
+        "name": "Different Name But Same Code",
+        "code": target_sub.code,
+        "department_id": target_sub.department_id,
+        "semester": target_sub.semester,
+        "required_hours_per_week": 4.0
+    }
+    resp = client.post(f"/api/organizations/{org.id}/subjects", json=dup_payload_code)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["id"] == target_sub.id, "Must return existing subject ID"
+    assert data.get("already_existed") is True
+
+    # 2. Attempt to create subject with the same name and semester
+    dup_payload_name = {
+        "name": target_sub.name,
+        "code": "NEWCODE99",
+        "department_id": target_sub.department_id,
+        "semester": target_sub.semester,
+        "required_hours_per_week": 4.0
+    }
+    resp2 = client.post(f"/api/organizations/{org.id}/subjects", json=dup_payload_name)
+    assert resp2.status_code == 200, resp2.text
+    data2 = resp2.json()
+    assert data2["id"] == target_sub.id, "Must return existing subject ID when name and semester match"
+    assert data2.get("already_existed") is True
+
+    # Verify database count has not increased
+    final_count = db.query(Subject).filter(Subject.org_id == org.id).count()
+    assert final_count == initial_count, f"Subject count must remain {initial_count}, got {final_count}"
+    db.close()
+
+
+def test_subject_deduplicate_endpoint_and_cleanup():
+    """
+    Verify that duplicate subject records are merged and teacher assignments
+    relinked to canonical subjects.
+    """
+    db = SessionLocal()
+    org = db.query(Organization).filter(Organization.type == "college").first()
+    assert org is not None
+    org_id = org.id
+
+    unique_code = f"QC-{uuid4().hex[:6].upper()}"
+    unique_name = f"Advanced Quantum Computing {unique_code}"
+
+    # Clean up any leftover row if any
+    db.query(Subject).filter(Subject.org_id == org_id, Subject.code == unique_code).delete()
+    db.commit()
+
+    # Create canonical subject
+    canonical = Subject(
+        org_id=org_id,
+        name=unique_name,
+        code=unique_code,
+        semester="S7",
+        required_hours_per_week=4.0
+    )
+    db.add(canonical)
+    db.commit()
+    db.refresh(canonical)
+
+    # Create duplicate subject
+    duplicate = Subject(
+        org_id=org_id,
+        name=unique_name,
+        code=unique_code,
+        semester="S7",
+        required_hours_per_week=4.0
+    )
+    db.add(duplicate)
+    db.commit()
+    db.refresh(duplicate)
+
+    teacher = db.query(Person).filter(Person.org_id == org_id).first()
+    assert teacher is not None
+
+    # Link teacher assignment to duplicate subject
+    ta = TeacherSubjectAssignment(
+        org_id=org_id,
+        person_id=teacher.id,
+        subject_id=duplicate.id,
+        semester="S7",
+        required_periods=4,
+        required_hours=4.0
+    )
+    db.add(ta)
+    db.commit()
+    db.refresh(ta)
+    ta_id = ta.id
+    canon_id = canonical.id
+    dup_id = duplicate.id
+    db.close()
+
+    # Call deduplicate endpoint
+    resp = client.post(f"/api/organizations/{org_id}/subjects/deduplicate")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["duplicates_removed"] >= 1
+
+    # Verify using fresh session
+    db2 = SessionLocal()
+    dup_check = db2.query(Subject).filter(Subject.id == dup_id).first()
+    assert dup_check is None, "Duplicate subject must be deleted"
+
+    canon_check = db2.query(Subject).filter(Subject.id == canon_id).first()
+    assert canon_check is not None, "Canonical subject must be preserved"
+
+    ta_check = db2.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.id == ta_id).first()
+    assert ta_check is not None
+    assert ta_check.subject_id == canon_id, "Teacher assignment must point to canonical subject"
+
+    # Cleanup
+    db2.delete(ta_check)
+    db2.delete(canon_check)
+    db2.commit()
+    db2.close()
+
+
+def test_teacher_assignment_does_not_create_duplicate_subjects():
+    """
+    Verify that creating and editing teacher assignments only references existing
+    Subject records and never creates redundant Subject rows.
+    """
+    db = SessionLocal()
+    org = db.query(Organization).filter(Organization.type == "college").first()
+    assert org is not None
+
+    initial_subject_count = db.query(Subject).filter(Subject.org_id == org.id).count()
+    subs = db.query(Subject).filter(Subject.org_id == org.id).all()
+    assert len(subs) >= 2
+
+    # Register teacher with existing subjects
+    teacher_payload = {
+        "org_id": org.id,
+        "name": "Prof. Claude Shannon",
+        "email": "shannon@information.edu",
+        "employee_code": "FAC-SHANNON-101",
+        "role_title": "Father of Information Theory",
+        "profession_type": "college",
+        "department_id": subs[0].department_id,
+        "max_hours_per_week": 40.0,
+        "teacher_assignments": [
+            {
+                "semester": subs[0].semester or "S3",
+                "subject_id": subs[0].id,
+                "required_periods": 4,
+                "period_duration": "1 hour"
+            },
+            {
+                "semester": subs[1].semester or "S5",
+                "subject_id": subs[1].id,
+                "required_periods": 3,
+                "period_duration": "1 hour"
+            }
+        ]
+    }
+
+    resp = client.post("/api/profiles", json=teacher_payload)
+    assert resp.status_code == 200, resp.text
+    t_data = resp.json()
+
+    # Verify subject count did not change
+    after_create_count = db.query(Subject).filter(Subject.org_id == org.id).count()
+    assert after_create_count == initial_subject_count, "No new Subject records should be created"
+
+    # Verify assignments reference existing subject IDs
+    assert len(t_data["teacher_assignments"]) == 2
+    for a in t_data["teacher_assignments"]:
+        assert a["subject_id"] in [subs[0].id, subs[1].id]
+
+    db.close()
+
 

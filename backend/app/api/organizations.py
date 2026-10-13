@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Dict, Any, Optional, Tuple
 import datetime
 from app.core.database import get_db
@@ -425,6 +426,73 @@ def delete_semester(org_id: int, semester_id: int, db: Session = Depends(get_db)
 
 # --- Subject Management Endpoints ---
 
+def deduplicate_organization_subjects(db: Session, org_id: int) -> int:
+    """
+    Finds and merges duplicate subject records in the organization.
+    Keeps the earliest record as canonical. Re-links any teacher assignments
+    or requirement slots pointing to duplicates before deleting the duplicate.
+    Returns the count of duplicates removed.
+    """
+    subjects = db.query(Subject).filter(Subject.org_id == org_id).order_by(Subject.id.asc()).all()
+    canonical_by_code: Dict[str, Subject] = {}
+    canonical_by_name_sem: Dict[Tuple[str, str], Subject] = {}
+    duplicates_to_remove: List[Tuple[Subject, Subject]] = []
+
+    for sub in subjects:
+        clean_code = (sub.code or "").strip().lower()
+        clean_name = (sub.name or "").strip().lower()
+        sem = (sub.semester or "").strip().upper()
+
+        matched_canonical = None
+        if clean_code and clean_code in canonical_by_code:
+            matched_canonical = canonical_by_code[clean_code]
+        elif (clean_name, sem) in canonical_by_name_sem:
+            matched_canonical = canonical_by_name_sem[(clean_name, sem)]
+
+        if matched_canonical and matched_canonical.id != sub.id:
+            duplicates_to_remove.append((sub, matched_canonical))
+        else:
+            if clean_code and clean_code not in canonical_by_code:
+                canonical_by_code[clean_code] = sub
+            if (clean_name, sem) not in canonical_by_name_sem:
+                canonical_by_name_sem[(clean_name, sem)] = sub
+
+    if not duplicates_to_remove:
+        return 0
+
+    removed_count = 0
+    for dup, canonical in duplicates_to_remove:
+        # 1. Re-link TeacherSubjectAssignment pointing to duplicate
+        tas = db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.subject_id == dup.id).all()
+        for ta in tas:
+            existing_ta = db.query(TeacherSubjectAssignment).filter(
+                TeacherSubjectAssignment.person_id == ta.person_id,
+                TeacherSubjectAssignment.subject_id == canonical.id,
+                TeacherSubjectAssignment.semester == ta.semester
+            ).first()
+            if existing_ta and existing_ta.id != ta.id:
+                db.delete(ta)
+            else:
+                ta.subject_id = canonical.id
+                ta.subject = canonical
+
+        # 2. Re-link RequirementSlot pointing to duplicate
+        slots = db.query(RequirementSlot).filter(RequirementSlot.subject_id == dup.id).all()
+        for slot in slots:
+            slot.subject_id = canonical.id
+
+        db.flush()
+
+        # Disassociate collection from dup before deletion to prevent orphan cascade
+        dup.teacher_assignments = []
+
+        # 3. Delete duplicate subject
+        db.delete(dup)
+        removed_count += 1
+
+    db.commit()
+    return removed_count
+
 @router.get("/{org_id}/subjects")
 def list_organization_subjects(
     org_id: int,
@@ -433,6 +501,9 @@ def list_organization_subjects(
     semester_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
+    # Consolidate any duplicate subjects safely before listing
+    deduplicate_organization_subjects(db, org_id)
+
     query = db.query(Subject).filter(Subject.org_id == org_id)
     if department_id:
         query = query.filter(Subject.department_id == department_id)
@@ -479,6 +550,14 @@ def list_organization_subjects(
         for s in subjects
     ]
 
+@router.post("/{org_id}/subjects/deduplicate")
+def deduplicate_subjects_endpoint(org_id: int, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    removed = deduplicate_organization_subjects(db, org_id)
+    return {"success": True, "duplicates_removed": removed}
+
 @router.post("/{org_id}/subjects")
 def create_subject(org_id: int, payload: SubjectCreate, db: Session = Depends(get_db)):
     org = db.query(Organization).filter(Organization.id == org_id).first()
@@ -497,6 +576,59 @@ def create_subject(org_id: int, payload: SubjectCreate, db: Session = Depends(ge
         sem_obj = db.query(Semester).filter(Semester.org_id == org_id, Semester.code == sem_str).first()
         if sem_obj:
             sem_id = sem_obj.id
+
+    # Check for existing subject to prevent duplicates (by code or by name + semester)
+    existing = None
+    if clean_code:
+        existing = db.query(Subject).filter(
+            Subject.org_id == org_id,
+            func.lower(Subject.code) == clean_code.lower()
+        ).first()
+
+    if not existing:
+        name_query = db.query(Subject).filter(
+            Subject.org_id == org_id,
+            func.lower(Subject.name) == clean_name.lower()
+        )
+        if sem_str:
+            existing = name_query.filter(
+                (Subject.semester == sem_str) | (Subject.semester_id == sem_id)
+            ).first()
+        else:
+            existing = name_query.first()
+
+    if existing:
+        # Subject already exists! Update missing attributes and return without duplicate row creation
+        if payload.department_id is not None:
+            existing.department_id = payload.department_id
+        if sem_id is not None and not existing.semester_id:
+            existing.semester_id = sem_id
+        if sem_str is not None and not existing.semester:
+            existing.semester = sem_str
+        if payload.class_name is not None and not existing.class_name:
+            existing.class_name = payload.class_name.strip()
+        if payload.required_hours_per_week is not None:
+            existing.required_hours_per_week = payload.required_hours_per_week
+        if payload.is_lab is not None:
+            existing.is_lab = bool(payload.is_lab)
+        if payload.description is not None and not existing.description:
+            existing.description = payload.description.strip()
+        db.commit()
+        db.refresh(existing)
+        return {
+            "id": existing.id,
+            "org_id": existing.org_id,
+            "department_id": existing.department_id,
+            "semester_id": existing.semester_id,
+            "name": existing.name,
+            "code": existing.code,
+            "semester": existing.semester,
+            "class_name": existing.class_name,
+            "required_hours_per_week": existing.required_hours_per_week,
+            "is_lab": existing.is_lab,
+            "description": existing.description,
+            "already_existed": True
+        }
 
     sub = Subject(
         org_id=org_id,
@@ -524,7 +656,8 @@ def create_subject(org_id: int, payload: SubjectCreate, db: Session = Depends(ge
         "class_name": sub.class_name,
         "required_hours_per_week": sub.required_hours_per_week,
         "is_lab": sub.is_lab,
-        "description": sub.description
+        "description": sub.description,
+        "already_existed": False
     }
 
 @router.put("/{org_id}/subjects/{subject_id}")

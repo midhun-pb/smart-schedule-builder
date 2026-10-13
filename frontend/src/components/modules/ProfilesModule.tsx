@@ -946,14 +946,19 @@ export const ProfilesModule: React.FC = () => {
                             required
                             value={row.subject_id || ''}
                             onChange={(e) => {
-                              handleUpdateFormAssignment(idx, { subject_id: Number(e.target.value) || undefined });
+                              const chosenId = Number(e.target.value) || undefined;
+                              const chosenSub = subjectsList.find((s) => s.id === chosenId);
+                              handleUpdateFormAssignment(idx, {
+                                subject_id: chosenId,
+                                required_periods: chosenSub?.required_hours_per_week ? Math.round(chosenSub.required_hours_per_week) : row.required_periods,
+                              });
                             }}
                             className="w-full px-3 py-2 rounded-xl glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
                           >
                             <option value="">-- Select Subject for {row.semester} --</option>
                             {rowSemesterSubjects.map((sub) => (
                               <option key={sub.id} value={sub.id}>
-                                {sub.name} {sub.code ? `(${sub.code})` : ''}
+                                {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
                               </option>
                             ))}
                             {rowSemesterSubjects.length === 0 && (
@@ -1464,15 +1469,20 @@ export const ProfilesModule: React.FC = () => {
                                 <label className="block text-[10px] font-bold text-slate-500 mb-1">Subject</label>
                                 <select
                                   value={row.subject_id || ''}
-                                  onChange={(e) =>
-                                    handleUpdateEditAssignment(idx, { subject_id: Number(e.target.value) || undefined })
-                                  }
+                                  onChange={(e) => {
+                                    const chosenId = Number(e.target.value) || undefined;
+                                    const chosenSub = subjectsList.find((s) => s.id === chosenId);
+                                    handleUpdateEditAssignment(idx, {
+                                      subject_id: chosenId,
+                                      required_periods: chosenSub?.required_hours_per_week ? Math.round(chosenSub.required_hours_per_week) : row.required_periods,
+                                    });
+                                  }}
                                   className="w-full px-2.5 py-1.5 rounded-lg glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
                                 >
                                   <option value="">-- Choose Subject --</option>
                                   {rowSubjects.map((sub) => (
                                     <option key={sub.id} value={sub.id}>
-                                      {sub.name} {sub.code ? `(${sub.code})` : ''}
+                                      {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
                                     </option>
                                   ))}
                                   {rowSubjects.length === 0 && (

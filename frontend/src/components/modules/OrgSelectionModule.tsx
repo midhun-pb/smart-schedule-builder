@@ -121,6 +121,7 @@ export const OrgSelectionModule: React.FC = () => {
   const [subDeptId, setSubDeptId] = useState<number | undefined>(undefined);
   const [subIsLab, setSubIsLab] = useState<boolean>(false);
   const [subHours, setSubHours] = useState<number>(4);
+  const [editingSubjectId, setEditingSubjectId] = useState<number | null>(null);
 
   // STEP 5 State: Timetable Configuration & Breaks
   const [weeklySchedule, setWeeklySchedule] = useState<Record<string, any>>({});
@@ -407,9 +408,14 @@ export const OrgSelectionModule: React.FC = () => {
     setCurrentStep(3);
   };
 
-  // Helper: Ensure college curriculum has foundational courses
+  // Helper: Ensure college curriculum has foundational courses without duplicating
   const ensureCollegeSubjects = async (orgId: number) => {
     try {
+      const existing = await api.getSubjects(orgId);
+      if (existing && existing.length > 0) {
+        setSubjectsList(existing);
+        return;
+      }
       const depts = await api.getDepartments(orgId);
       const deptId = depts && depts.length > 0 ? depts[0].id : undefined;
       const defaults = [
@@ -478,14 +484,29 @@ export const OrgSelectionModule: React.FC = () => {
     }));
   };
 
-  // Quick Add Subject directly from Step 3
+  // Quick Add Subject directly from Step 3 (shortcut to central curriculum)
   const handleQuickAddSubject = async () => {
     if (!createdOrgId || !quickSubName.trim()) return;
     try {
-      const code = quickSubName.replace(/[^A-Za-z0-9]/g, '').slice(0, 5).toUpperCase();
+      const trimmedName = quickSubName.trim();
+      const code = trimmedName.replace(/[^A-Za-z0-9]/g, '').slice(0, 5).toUpperCase() || 'SUB';
+
+      // Check if already in subjectsList
+      const existing = subjectsList.find(
+        (s) => (s.code && s.code.toUpperCase() === code) ||
+               (s.name.toLowerCase() === trimmedName.toLowerCase() && (!quickSubSemester || s.semester === quickSubSemester))
+      );
+
+      if (existing) {
+        addToast('Subject Already Exists', `Referencing existing course "${existing.name}" (${existing.code})`, 'info');
+        setQuickSubName('');
+        setShowQuickAddSub(false);
+        return;
+      }
+
       const newSub = await api.createSubject(createdOrgId, {
-        name: quickSubName.trim(),
-        code: code || 'SUB',
+        name: trimmedName,
+        code: code,
         department_id: quickSubDeptId || personDeptId || (departmentsList[0]?.id ?? undefined),
         semester: quickSubSemester || 'S1',
         required_hours_per_week: 4,
@@ -495,7 +516,13 @@ export const OrgSelectionModule: React.FC = () => {
       setSubjectsList(updated || []);
       setQuickSubName('');
       setShowQuickAddSub(false);
-      addToast('Subject Added', `${newSub.name} created for ${newSub.semester}`, 'success');
+      addToast(
+        newSub.already_existed ? 'Subject Linked' : 'Subject Added',
+        newSub.already_existed
+          ? `Linked to existing curriculum record for ${newSub.name}`
+          : `${newSub.name} registered in central curriculum`,
+        'success'
+      );
     } catch (err: any) {
       addToast('Error', err.message || 'Failed to add subject', 'error');
     }
@@ -754,28 +781,72 @@ export const OrgSelectionModule: React.FC = () => {
     setCurrentStep(4);
   };
 
-  // STEP 4: Add Subject / Duty
-  const handleAddSubject = async () => {
+  // STEP 4: Central Subject Curriculum Management Handlers
+  const handleAddOrUpdateSubject = async () => {
     triggerHaptic(10);
     if (!subName.trim() || !createdOrgId) return;
 
     try {
-      const newSub = await api.createSubject(createdOrgId, {
-        name: subName.trim(),
-        code: subCode.trim() || subName.slice(0, 4).toUpperCase(),
-        department_id: subDeptId || (departmentsList[0]?.id ?? undefined),
-        semester: subSemester,
-        class_name: subClass,
-        required_hours_per_week: subHours,
-        is_lab: subIsLab,
-      });
-      setSubjectsList([...subjectsList, newSub]);
+      if (editingSubjectId) {
+        await api.updateSubject(createdOrgId, editingSubjectId, {
+          name: subName.trim(),
+          code: subCode.trim().toUpperCase() || subName.slice(0, 4).toUpperCase(),
+          department_id: subDeptId || undefined,
+          semester: subSemester,
+          class_name: subClass || undefined,
+          required_hours_per_week: subHours,
+          is_lab: subIsLab,
+        });
+        addToast('Subject Updated', `${subName} updated in central curriculum`, 'success');
+        setEditingSubjectId(null);
+      } else {
+        const newSub = await api.createSubject(createdOrgId, {
+          name: subName.trim(),
+          code: subCode.trim().toUpperCase() || subName.slice(0, 4).toUpperCase(),
+          department_id: subDeptId || (departmentsList[0]?.id ?? undefined),
+          semester: subSemester,
+          class_name: subClass || undefined,
+          required_hours_per_week: subHours,
+          is_lab: subIsLab,
+        });
+        addToast(
+          newSub.already_existed ? 'Subject Linked' : 'Subject Added',
+          newSub.already_existed
+            ? `${newSub.name} already exists; updated curriculum record`
+            : `${newSub.name} added to central curriculum`,
+          'success'
+        );
+      }
+      const updated = await api.getSubjects(createdOrgId);
+      setSubjectsList(updated || []);
       setSubName('');
       setSubCode('');
-      addToast('Subject Added', `${newSub.name} added to curriculum`, 'success');
+      setSubHours(4);
+      setSubIsLab(false);
     } catch (err: any) {
-      addToast('Error', err.message, 'error');
+      addToast('Error', err.message || 'Failed to save subject', 'error');
     }
+  };
+
+  const handleStartEditSubject = (s: Subject) => {
+    triggerHaptic(10);
+    setEditingSubjectId(s.id);
+    setSubName(s.name);
+    setSubCode(s.code || '');
+    setSubDeptId(s.department_id);
+    setSubSemester(s.semester || 'S1');
+    setSubClass(s.class_name || '');
+    setSubHours(s.required_hours_per_week || 4);
+    setSubIsLab(Boolean(s.is_lab));
+  };
+
+  const handleCancelEditSubject = () => {
+    triggerHaptic(10);
+    setEditingSubjectId(null);
+    setSubName('');
+    setSubCode('');
+    setSubHours(4);
+    setSubIsLab(false);
   };
 
   const handleDeleteSubject = async (id: number) => {
@@ -784,6 +855,9 @@ export const OrgSelectionModule: React.FC = () => {
     try {
       await api.deleteSubject(createdOrgId, id);
       setSubjectsList(subjectsList.filter((s) => s.id !== id));
+      if (editingSubjectId === id) {
+        handleCancelEditSubject();
+      }
       addToast('Subject Deleted', 'Removed from curriculum', 'info');
     } catch (err: any) {
       addToast('Error', err.message, 'error');
@@ -805,7 +879,14 @@ export const OrgSelectionModule: React.FC = () => {
     ];
 
     try {
+      const existingCodes = new Set(subjectsList.map((s) => s.code?.toUpperCase()));
+      const existingNames = new Set(subjectsList.map((s) => `${s.name.toLowerCase()}__${s.semester || ''}`));
+
+      let addedCount = 0;
       for (const d of defaults) {
+        if (existingCodes.has(d.code.toUpperCase()) || existingNames.has(`${d.name.toLowerCase()}__${d.sem}`)) {
+          continue; // Skip already existing subject
+        }
         await api.createSubject(createdOrgId, {
           name: d.name,
           code: d.code,
@@ -815,10 +896,15 @@ export const OrgSelectionModule: React.FC = () => {
           required_hours_per_week: d.hrs,
           is_lab: d.lab,
         });
+        addedCount++;
       }
       const updated = await api.getSubjects(createdOrgId);
       setSubjectsList(updated || []);
-      addToast('Curriculum Configured', `Added ${defaults.length} foundational courses across semesters S1-S7`, 'success');
+      if (addedCount > 0) {
+        addToast('Curriculum Configured', `Added ${addedCount} foundational course(s) across semesters`, 'success');
+      } else {
+        addToast('Curriculum Up to Date', 'All foundational courses already exist in central curriculum', 'info');
+      }
     } catch (err: any) {
       addToast('Error', err.message, 'error');
     }
@@ -1793,8 +1879,11 @@ export const OrgSelectionModule: React.FC = () => {
                                         required
                                         value={row.subject_id || ''}
                                         onChange={(e) => {
+                                          const chosenId = Number(e.target.value) || undefined;
+                                          const chosenSub = subjectsList.find((s) => s.id === chosenId);
                                           handleUpdateStep3Assignment(idx, {
-                                            subject_id: Number(e.target.value) || undefined,
+                                            subject_id: chosenId,
+                                            required_periods: chosenSub?.required_hours_per_week ? Math.round(chosenSub.required_hours_per_week) : row.required_periods,
                                           });
                                         }}
                                         className="w-full px-3 py-2 rounded-xl glass-input text-xs font-bold text-blue-600 dark:text-blue-400"
@@ -1802,7 +1891,7 @@ export const OrgSelectionModule: React.FC = () => {
                                         <option value="">-- Select Subject for {row.semester} --</option>
                                         {rowSemesterSubjects.map((sub) => (
                                           <option key={sub.id} value={sub.id}>
-                                            {sub.name} {sub.code ? `(${sub.code})` : ''}
+                                            {sub.name} {sub.code ? `(${sub.code})` : ''} • {sub.required_hours_per_week}h/wk
                                           </option>
                                         ))}
                                         {rowSemesterSubjects.length === 0 && (
@@ -2108,11 +2197,27 @@ export const OrgSelectionModule: React.FC = () => {
                 )}
               </div>
 
-              {/* Add Subject Form */}
+              {/* Add / Edit Subject Form */}
               {selectedType === 'college' ? (
                 <div className="p-5 rounded-2xl glass-card border border-white/40 dark:border-white/10 space-y-4">
+                  {editingSubjectId && (
+                    <div className="p-3.5 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-between text-xs text-blue-700 dark:text-blue-300">
+                      <div className="flex items-center gap-2 font-bold">
+                        <Edit2 className="w-4 h-4 text-blue-600" />
+                        <span>Editing Course: {subName} {subCode ? `(${subCode})` : ''}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleCancelEditSubject}
+                        className="px-2.5 py-1 rounded-lg bg-white/60 dark:bg-slate-800/60 hover:bg-white text-slate-700 dark:text-slate-200 text-xs font-semibold transition-all"
+                      >
+                        Cancel Edit
+                      </button>
+                    </div>
+                  )}
+
                   <div className="font-bold text-xs text-slate-700 dark:text-slate-300">
-                    Add Academic Course / Subject
+                    {editingSubjectId ? 'Update Academic Course / Subject' : 'Add Academic Course / Subject'}
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                     <div className="md:col-span-2">
@@ -2152,14 +2257,24 @@ export const OrgSelectionModule: React.FC = () => {
 
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-center">
                     <div>
-                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Semester</label>
-                      <input
-                        type="text"
+                      <label className="block text-[11px] font-semibold text-slate-500 mb-1">Semester *</label>
+                      <select
                         value={subSemester}
                         onChange={(e) => setSubSemester(e.target.value)}
-                        placeholder="S5"
-                        className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                      />
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        {semestersList.map((sem) => (
+                          <option key={sem.id} value={sem.code}>
+                            {sem.code} ({sem.name})
+                          </option>
+                        ))}
+                        {semestersList.length === 0 &&
+                          ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'].map((s) => (
+                            <option key={s} value={s}>
+                              {s}
+                            </option>
+                          ))}
+                      </select>
                     </div>
                     <div>
                       <label className="block text-[11px] font-semibold text-slate-500 mb-1">Class / Section</label>
@@ -2194,14 +2309,23 @@ export const OrgSelectionModule: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex justify-end">
+                  <div className="flex justify-end gap-2">
+                    {editingSubjectId && (
+                      <button
+                        type="button"
+                        onClick={handleCancelEditSubject}
+                        className="px-4 py-2 rounded-xl glass-pill text-xs font-semibold"
+                      >
+                        Cancel
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={handleAddSubject}
+                      onClick={handleAddOrUpdateSubject}
                       className="px-4 py-2 rounded-xl glass-button-primary text-xs font-semibold flex items-center gap-1.5"
                     >
                       <Plus className="w-3.5 h-3.5" />
-                      <span>Add Subject</span>
+                      <span>{editingSubjectId ? 'Update Subject' : 'Add Subject'}</span>
                     </button>
                   </div>
                 </div>
@@ -2241,15 +2365,27 @@ export const OrgSelectionModule: React.FC = () => {
                               )}
                             </div>
                             <div className="text-[11px] text-slate-500 mt-0.5">
-                              {s.semester || 'S5'} • Class {s.class_name || 'All'} • {s.department_name || 'General'}
+                              {s.semester || 'S1'} • {s.required_hours_per_week || 4} periods/wk • {s.department_name || 'General'}
                             </div>
                           </div>
-                          <button
-                            onClick={() => handleDeleteSubject(s.id)}
-                            className="p-1 text-slate-400 hover:text-red-500 transition-colors"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleStartEditSubject(s)}
+                              className="p-1.5 rounded-lg hover:bg-blue-500/10 text-slate-400 hover:text-blue-500 transition-colors"
+                              title="Edit Subject"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSubject(s.id)}
+                              className="p-1.5 rounded-lg hover:bg-red-500/10 text-slate-400 hover:text-red-500 transition-colors"
+                              title="Delete Subject"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
