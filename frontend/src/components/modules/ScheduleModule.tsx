@@ -1181,22 +1181,48 @@ export const ScheduleModule: React.FC = () => {
     }
   };
 
-  // Reusable slot card renderer with prominent subject display & drag-and-drop
+  // Reusable slot card renderer with prominent subject/employee display & drag-and-drop
   const renderSlotCard = (slot: TimetableSlot) => {
     const isReplacement = slot.is_replacement;
     const isBreak = slot.period_type === 'break' || slot.period_type === 'lunch';
     const isUnderstaffed = slot.staffing_status === 'understaffed';
     const isOverstaffed = slot.staffing_status === 'overstaffed';
     const isLocked = slot.is_locked;
-    const isCollege = activeOrg?.type === 'college';
+
+    const orgType = (slot as any).profession_metadata?.org_type || activeOrg?.type || 'college';
+    const isCompany = orgType === 'company';
+    const isAirline = orgType === 'airline';
+    const isCollege = !isCompany && !isAirline;
+
+    // University / College fields:
+    // Required: Subject name, subject code, semester, department, faculty name, day, period, start/end time, and room where configured.
     const subjectName = slot.subject_name || slot.subject || (slot as any).profession_metadata?.subject;
     const subjectCode = slot.subject_code || (slot as any).subject?.code || (slot as any).profession_metadata?.subject_code || (slot.subject_id ? subjectsList.find((s) => s.id === slot.subject_id)?.code : undefined);
     const semesterStr = slot.semester || (slot as any).profession_metadata?.semester || (isCollege ? 'S3' : '');
-    const deptName = slot.department_name || departmentsList.find((d) => d.id === slot.department_id)?.name || (isCollege ? 'Computer Science & Engineering' : '');
+    const deptName = slot.department_name || (slot as any).profession_metadata?.department || departmentsList.find((d) => d.id === slot.department_id)?.name || (isCollege ? 'Computer Science & Engineering' : '');
     const className = slot.class_name || (slot as any).profession_metadata?.class_name || (isCollege ? 'S3 A' : '');
-    const teacherName = slot.person_name;
-    const roomName = slot.resource_name || 'Lecture Hall 101';
+    const teacherName = slot.person_name || (slot as any).profession_metadata?.faculty_name;
+    const roomName = slot.resource_name || (slot as any).profession_metadata?.room || 'Lecture Hall 101';
     const periodTitle = slot.title;
+    const dayName = ALL_DAYS[slot.day_of_week] || 'Day';
+
+    // Company / Office fields:
+    // Required: Employee name, department/team, role, duty, day, start/end time, and location where configured.
+    const empName = (slot as any).profession_metadata?.employee_name || slot.person_name || 'Assigned Staff';
+    const empDept = (slot as any).profession_metadata?.department || slot.department_name || departmentsList.find((d) => d.id === slot.department_id)?.name || 'Operations';
+    const empRole = (slot as any).profession_metadata?.role || (slot.person_id ? people.find((p) => p.id === slot.person_id)?.role_title : '') || 'Employee';
+    const empDuty = (slot as any).profession_metadata?.duty || (slot as any).duty || slot.title || 'Office Duty';
+    const empLocation = (slot as any).profession_metadata?.location || (slot as any).location || slot.resource_name || 'Main Office';
+
+    // Aviation / Airline fields:
+    // Required: Crew member, role, duty, assigned time, and relevant operational information.
+    const crewMember = (slot as any).profession_metadata?.crew_member || slot.person_name || 'Assigned Crew';
+    const crewRole = (slot as any).profession_metadata?.role || (slot.person_id ? people.find((p) => p.id === slot.person_id)?.role_title : '') || 'Flight Crew';
+    const crewDuty = (slot as any).profession_metadata?.duty || (slot as any).duty || slot.title || 'Flight Duty';
+    const flightNumber = (slot as any).profession_metadata?.flight_number || (slot as any).flight_number;
+    const aircraft = (slot as any).profession_metadata?.aircraft || (slot as any).aircraft;
+    const gate = (slot as any).profession_metadata?.gate || (slot as any).gate;
+    const operationalInfo = (slot as any).profession_metadata?.operational_info || (slot as any).operational_info || [flightNumber, aircraft, gate ? `Gate ${gate}` : null].filter(Boolean).join(' • ');
 
     return (
       <div
@@ -1217,7 +1243,7 @@ export const ScheduleModule: React.FC = () => {
           setEditSlot(slot);
           setSelectedPersonId(slot.person_id);
           setEditSlotSubjectId(slot.subject_id || (slot as any).subject?.id);
-          setEditSlotSubjectName(subjectName || slot.title || '');
+          setEditSlotSubjectName(subjectName || empDuty || slot.title || '');
           setEditSlotSemester(semesterStr || 'S3');
           setEditSlotClass(className || 'S3 A');
           setEditSlotResourceId(slot.resource_id);
@@ -1299,36 +1325,113 @@ export const ScheduleModule: React.FC = () => {
           </div>
         </div>
 
-        {/* 1. SUBJECT NAME IN BOLD & CODE */}
-        <div className="space-y-1">
-          {isBreak ? (
-            <div className="text-xs font-black text-slate-500 italic">
-              {slot.period_type === 'lunch' ? 'Lunch Break' : periodTitle || 'Recess Interval'}
+        {/* Break Slot Display */}
+        {isBreak ? (
+          <div className="py-2 text-center text-xs font-black text-slate-500 italic">
+            {slot.period_type === 'lunch' ? 'Lunch Break' : periodTitle || 'Recess Interval'}
+          </div>
+        ) : isCompany ? (
+          /* COMPANY / OFFICE TIMETABLE CARD */
+          <div className="space-y-1">
+            {/* 1. EMPLOYEE NAME IN BOLD */}
+            <div className="text-xs font-black text-slate-900 dark:text-white leading-tight tracking-tight uppercase flex items-center gap-1.5">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 flex-shrink-0" />
+              <span className="truncate">{empName}</span>
             </div>
-          ) : subjectName ? (
-            <div>
-              <div className="text-xs font-black text-blue-600 dark:text-blue-400 leading-tight tracking-tight uppercase">
-                {subjectName}
-              </div>
-              {subjectCode && (
-                <div className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400">
-                  Code: <span className="text-slate-700 dark:text-slate-200">{subjectCode}</span>
-                </div>
-              )}
-            </div>
-          ) : isCollege ? (
-            <div className="text-xs font-black text-amber-500 dark:text-amber-400 leading-tight flex items-center gap-1">
-              <span>Subject not assigned</span>
-              <span className="text-[9px] font-normal underline opacity-80">(click to assign)</span>
-            </div>
-          ) : (
-            <div className="text-xs font-black text-slate-900 dark:text-white leading-tight">
-              {periodTitle}
-            </div>
-          )}
 
-          {/* 2. SEMESTER & DEPARTMENT LINE */}
-          {!isBreak && isCollege && (
+            {/* 2. DEPARTMENT / TEAM & ROLE */}
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold space-y-0.5">
+              <div className="flex items-center gap-1">
+                <span className="text-slate-400">Team:</span>
+                <span className="font-bold text-slate-800 dark:text-slate-200 truncate">{empDept}</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-slate-400">Role:</span>
+                <span className="font-bold text-blue-600 dark:text-blue-400 truncate">{empRole}</span>
+              </div>
+            </div>
+
+            {/* 3. ASSIGNED DUTY */}
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Duty:</span>
+              <span className="font-bold text-slate-900 dark:text-slate-100 truncate">{empDuty}</span>
+            </div>
+
+            {/* 4. DAY & TIME */}
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Day:</span>
+              <span className="font-medium text-slate-700 dark:text-slate-300">{dayName}</span>
+              <span className="text-slate-400 ml-1">Time:</span>
+              <span className="font-mono font-bold text-blue-600 dark:text-blue-400">{slot.start_time}–{slot.end_time}</span>
+            </div>
+
+            {/* 5. LOCATION */}
+            <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center gap-1 pt-1 border-t border-slate-200/40 dark:border-slate-800/40">
+              <MapPin className="w-2.5 h-2.5 text-slate-400 flex-shrink-0" />
+              <span>Location: <span className="font-medium text-slate-700 dark:text-slate-300 truncate">{empLocation}</span></span>
+            </div>
+          </div>
+        ) : isAirline ? (
+          /* AVIATION / AIRLINE TIMETABLE CARD */
+          <div className="space-y-1">
+            {/* 1. CREW MEMBER IN BOLD */}
+            <div className="text-xs font-black text-blue-600 dark:text-blue-400 leading-tight tracking-tight uppercase flex items-center gap-1.5">
+              <div className="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0" />
+              <span className="truncate">{crewMember}</span>
+            </div>
+
+            {/* 2. CREW ROLE */}
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Role:</span>
+              <span className="font-bold text-slate-800 dark:text-slate-200 truncate">{crewRole}</span>
+            </div>
+
+            {/* 3. FLIGHT DUTY */}
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Duty:</span>
+              <span className="font-bold text-slate-900 dark:text-slate-100 truncate">{crewDuty}</span>
+            </div>
+
+            {/* 4. DAY & ASSIGNED TIME */}
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Day:</span>
+              <span className="font-medium text-slate-700 dark:text-slate-300">{dayName}</span>
+              <span className="text-slate-400 ml-1">Time:</span>
+              <span className="font-mono font-bold text-blue-600 dark:text-blue-400">{slot.start_time}–{slot.end_time}</span>
+            </div>
+
+            {/* 5. OPERATIONAL INFORMATION */}
+            {operationalInfo && (
+              <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center gap-1 pt-1 border-t border-slate-200/40 dark:border-slate-800/40">
+                <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 truncate">
+                  {operationalInfo}
+                </span>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* UNIVERSITY / COLLEGE TIMETABLE CARD */
+          <div className="space-y-1">
+            {/* 1. SUBJECT NAME IN BOLD & CODE */}
+            {subjectName ? (
+              <div>
+                <div className="text-xs font-black text-blue-600 dark:text-blue-400 leading-tight tracking-tight uppercase">
+                  {subjectName}
+                </div>
+                {subjectCode && (
+                  <div className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                    Code: <span className="text-slate-700 dark:text-slate-200">{subjectCode}</span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-xs font-black text-amber-500 dark:text-amber-400 leading-tight flex items-center gap-1">
+                <span>Subject not assigned</span>
+                <span className="text-[9px] font-normal underline opacity-80">(click to assign)</span>
+              </div>
+            )}
+
+            {/* 2. SEMESTER & DEPARTMENT LINE */}
             <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold space-y-0.5">
               <div className="flex items-center gap-1">
                 <span className="text-slate-400">Semester:</span>
@@ -1341,18 +1444,16 @@ export const ScheduleModule: React.FC = () => {
                 </div>
               )}
             </div>
-          )}
 
-          {/* 3. CLASS */}
-          {!isBreak && className && (
-            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
-              <span className="text-slate-400">Class:</span>
-              <span className="font-bold text-slate-800 dark:text-slate-200">{className}</span>
-            </div>
-          )}
+            {/* 3. CLASS */}
+            {className && (
+              <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+                <span className="text-slate-400">Class:</span>
+                <span className="font-bold text-slate-800 dark:text-slate-200">{className}</span>
+              </div>
+            )}
 
-          {/* 4. FACULTY NAME */}
-          {!isBreak && (
+            {/* 4. FACULTY NAME */}
             <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
               <span className="text-slate-400">Faculty:</span>
               {teacherName ? (
@@ -1365,29 +1466,34 @@ export const ScheduleModule: React.FC = () => {
                 </span>
               )}
             </div>
-          )}
 
-          {/* 5. TIME */}
-          <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
-            <span className="text-slate-400">Time:</span>
-            <span className="font-mono font-bold text-blue-600 dark:text-blue-400">{slot.start_time}–{slot.end_time}</span>
-          </div>
-
-          {/* 6. ROOM OR LABORATORY */}
-          <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between gap-1 pt-1 border-t border-slate-200/40 dark:border-slate-800/40">
-            <span className="truncate flex items-center gap-1">
-              <MapPin className="w-2.5 h-2.5 text-slate-400 flex-shrink-0" />
-              <span>Room: <span className="font-medium text-slate-700 dark:text-slate-300">{roomName}</span></span>
-            </span>
-          </div>
-
-          {/* 7. SECONDARY INFO: Period Name */}
-          {!isBreak && periodTitle && periodTitle !== subjectName && (
-            <div className="text-[9px] italic text-slate-400 truncate">
-              Period: {periodTitle}
+            {/* 5. DAY & PERIOD */}
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Day:</span>
+              <span className="font-medium text-slate-700 dark:text-slate-300">{dayName}</span>
+              {periodTitle && periodTitle !== subjectName && (
+                <>
+                  <span className="text-slate-400 ml-1">Period:</span>
+                  <span className="font-medium text-slate-700 dark:text-slate-300 truncate">{periodTitle}</span>
+                </>
+              )}
             </div>
-          )}
-        </div>
+
+            {/* 6. START / END TIME */}
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Time:</span>
+              <span className="font-mono font-bold text-blue-600 dark:text-blue-400">{slot.start_time}–{slot.end_time}</span>
+            </div>
+
+            {/* 7. ROOM OR LABORATORY */}
+            <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between gap-1 pt-1 border-t border-slate-200/40 dark:border-slate-800/40">
+              <span className="truncate flex items-center gap-1">
+                <MapPin className="w-2.5 h-2.5 text-slate-400 flex-shrink-0" />
+                <span>Room: <span className="font-medium text-slate-700 dark:text-slate-300">{roomName}</span></span>
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Staff Assignment & Badges */}
         <div className="mt-2 pt-1.5 border-t border-slate-200/40 dark:border-slate-800/40 flex items-center justify-between gap-1">
@@ -1406,9 +1512,17 @@ export const ScheduleModule: React.FC = () => {
                   covers for {slot.original_person_name}
                 </div>
               </div>
-            ) : (
+            ) : isCollege ? (
               <div className="text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate">
                 {slot.person_name || 'Unfilled Slot'}
+              </div>
+            ) : isCompany ? (
+              <div className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 truncate flex items-center gap-1">
+                <span>Active Shift</span>
+              </div>
+            ) : (
+              <div className="text-[10px] font-bold text-blue-600 dark:text-blue-400 truncate flex items-center gap-1">
+                <span>Flight Roster</span>
               </div>
             )}
           </div>
@@ -1416,7 +1530,7 @@ export const ScheduleModule: React.FC = () => {
           {/* Badges */}
           {!isBreak && (
             <div className="flex items-center gap-1 flex-shrink-0">
-              {slot.title?.toLowerCase().includes('lab') && (
+              {isCollege && slot.title?.toLowerCase().includes('lab') && (
                 <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-600 dark:text-blue-400 text-[9px] font-bold uppercase tracking-wider border border-blue-500/25">
                   Lab
                 </span>
@@ -1596,19 +1710,7 @@ export const ScheduleModule: React.FC = () => {
             }`}
           >
             <CalendarDays className="w-3.5 h-3.5" />
-            <span>Timetable Matrix</span>
-          </button>
-          <button
-            onClick={() => {
-              triggerHaptic(10);
-              setPerspective('employee');
-            }}
-            className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-1.5 whitespace-nowrap ${
-              perspective === 'employee' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span>Employee View</span>
+            <span>Organization-wide Timetable</span>
           </button>
           <button
             onClick={() => {
@@ -1620,8 +1722,46 @@ export const ScheduleModule: React.FC = () => {
             }`}
           >
             <Building className="w-3.5 h-3.5" />
-            <span>Department View</span>
+            <span>
+              {activeOrg?.type === 'airline'
+                ? 'Division & Fleet Timetable'
+                : activeOrg?.type === 'company'
+                ? 'Department & Team Timetable'
+                : 'Department Timetable'}
+            </span>
           </button>
+          <button
+            onClick={() => {
+              triggerHaptic(10);
+              setPerspective('employee');
+            }}
+            className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-1.5 whitespace-nowrap ${
+              perspective === 'employee' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>
+              {activeOrg?.type === 'college'
+                ? 'Individual Faculty Timetable'
+                : activeOrg?.type === 'airline'
+                ? 'Individual Crew Timetable'
+                : 'Individual Employee Timetable'}
+            </span>
+          </button>
+          {activeOrg?.type === 'college' && (
+            <button
+              onClick={() => {
+                triggerHaptic(10);
+                setPerspective('academic');
+              }}
+              className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                perspective === 'academic' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
+              }`}
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>Semester Timetable (S1–S8)</span>
+            </button>
+          )}
           <button
             onClick={() => {
               triggerHaptic(10);
@@ -1632,7 +1772,13 @@ export const ScheduleModule: React.FC = () => {
             }`}
           >
             <MapPin className="w-3.5 h-3.5" />
-            <span>Resource & Room View</span>
+            <span>
+              {activeOrg?.type === 'airline'
+                ? 'Aircraft & Gate View'
+                : activeOrg?.type === 'company'
+                ? 'Workstation & Facility View'
+                : 'Resource & Room View'}
+            </span>
           </button>
           <button
             onClick={() => {
@@ -1646,20 +1792,6 @@ export const ScheduleModule: React.FC = () => {
             <Calendar className="w-3.5 h-3.5" />
             <span>Holiday & Closure View</span>
           </button>
-          {activeOrg?.type === 'college' && (
-            <button
-              onClick={() => {
-                triggerHaptic(10);
-                setPerspective('academic');
-              }}
-              className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-1.5 whitespace-nowrap ${
-                perspective === 'academic' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 dark:text-slate-300'
-              }`}
-            >
-              <BookOpen className="w-3.5 h-3.5" />
-              <span>Semesters & Subjects</span>
-            </button>
-          )}
           <button
             onClick={() => {
               triggerHaptic(10);
@@ -1965,7 +2097,11 @@ export const ScheduleModule: React.FC = () => {
                     <Filter className="w-4 h-4 text-blue-500" />
                     <span>Timetable Filters:</span>
                     <span className="text-[11px] text-slate-400 font-normal">
-                      Filter periods by teacher, department, academic semester, subject, and class section
+                      {activeOrg?.type === 'college'
+                        ? 'Filter periods by faculty, department, academic semester, subject, and class section'
+                        : activeOrg?.type === 'airline'
+                        ? 'Filter flight duties by crew member and division/fleet'
+                        : 'Filter duties by employee and department/team'}
                     </span>
                   </div>
 
@@ -1990,141 +2126,200 @@ export const ScheduleModule: React.FC = () => {
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
-                  {/* Academic Year Filter */}
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                      Academic Year:
-                    </label>
-                    <select
-                      value={filterAcademicYear}
-                      onChange={(e) => {
-                        triggerHaptic(5);
-                        setFilterAcademicYear(e.target.value);
-                      }}
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
-                    >
-                      <option value="all">All Academic Years</option>
-                      <option value="2026-2027">2026–2027 (Current)</option>
-                      <option value="2025-2026">2025–2026</option>
-                      <option value="2024-2025">2024–2025</option>
-                    </select>
-                  </div>
+                {activeOrg?.type === 'college' ? (
+                  /* College Filter Grid: Academic Year, Semester, Teacher, Dept, Subject, Class */
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+                    {/* Academic Year Filter */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Academic Year:
+                      </label>
+                      <select
+                        value={filterAcademicYear}
+                        onChange={(e) => {
+                          triggerHaptic(5);
+                          setFilterAcademicYear(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        <option value="all">All Academic Years</option>
+                        <option value="2026-2027">2026–2027 (Current)</option>
+                        <option value="2025-2026">2025–2026</option>
+                        <option value="2024-2025">2024–2025</option>
+                      </select>
+                    </div>
 
-                  {/* Semester Filter: All 8 Semesters + Odd / Even */}
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                      Semester:
-                    </label>
-                    <select
-                      value={filterSemester}
-                      onChange={(e) => {
-                        triggerHaptic(5);
-                        setFilterSemester(e.target.value);
-                      }}
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
-                    >
-                      <option value="all">All Semesters</option>
-                      <option value="odd">Odd Semesters (S1, S3, S5, S7)</option>
-                      <option value="even">Even Semesters (S2, S4, S6, S8)</option>
-                      <optgroup label="Individual Semesters">
-                        {['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'].map((sem) => (
-                          <option key={sem} value={sem}>
-                            Semester {sem}
+                    {/* Semester Filter: All 8 Semesters + Odd / Even */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Semester:
+                      </label>
+                      <select
+                        value={filterSemester}
+                        onChange={(e) => {
+                          triggerHaptic(5);
+                          setFilterSemester(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        <option value="all">All Semesters</option>
+                        <option value="odd">Odd Semesters (S1, S3, S5, S7)</option>
+                        <option value="even">Even Semesters (S2, S4, S6, S8)</option>
+                        <optgroup label="Individual Semesters">
+                          {['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'].map((sem) => (
+                            <option key={sem} value={sem}>
+                              Semester {sem}
+                            </option>
+                          ))}
+                        </optgroup>
+                      </select>
+                    </div>
+
+                    {/* Faculty Filter */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Teacher / Faculty:
+                      </label>
+                      <select
+                        value={filterTeacher}
+                        onChange={(e) => {
+                          triggerHaptic(5);
+                          setFilterTeacher(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        <option value="all">All Teachers</option>
+                        {people.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
                           </option>
                         ))}
-                      </optgroup>
-                    </select>
-                  </div>
+                      </select>
+                    </div>
 
-                  {/* Teacher Filter */}
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                      Teacher / Faculty:
-                    </label>
-                    <select
-                      value={filterTeacher}
-                      onChange={(e) => {
-                        triggerHaptic(5);
-                        setFilterTeacher(e.target.value);
-                      }}
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
-                    >
-                      <option value="all">All Teachers</option>
-                      {people.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                    {/* Department Filter */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Department:
+                      </label>
+                      <select
+                        value={filterDept}
+                        onChange={(e) => {
+                          triggerHaptic(5);
+                          setFilterDept(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        <option value="all">All Departments</option>
+                        {departmentsList.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name} ({d.code})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
-                  {/* Department Filter */}
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                      Department:
-                    </label>
-                    <select
-                      value={filterDept}
-                      onChange={(e) => {
-                        triggerHaptic(5);
-                        setFilterDept(e.target.value);
-                      }}
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
-                    >
-                      <option value="all">All Departments</option>
-                      {departmentsList.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.name} ({d.code})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                    {/* Subject Filter */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Subject:
+                      </label>
+                      <select
+                        value={filterSubject}
+                        onChange={(e) => {
+                          triggerHaptic(5);
+                          setFilterSubject(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        <option value="all">All Subjects</option>
+                        {subjectsList.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} ({s.code || 'SUB'})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
-                  {/* Subject Filter */}
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                      Subject:
-                    </label>
-                    <select
-                      value={filterSubject}
-                      onChange={(e) => {
-                        triggerHaptic(5);
-                        setFilterSubject(e.target.value);
-                      }}
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
-                    >
-                      <option value="all">All Subjects</option>
-                      {subjectsList.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.code || 'SUB'})
-                        </option>
-                      ))}
-                    </select>
+                    {/* Class / Section Filter */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Class / Section:
+                      </label>
+                      <select
+                        value={filterClass}
+                        onChange={(e) => {
+                          triggerHaptic(5);
+                          setFilterClass(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        <option value="all">All Classes</option>
+                        {availableClasses.map((cls) => (
+                          <option key={cls} value={cls}>
+                            Class {cls}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
+                ) : (
+                  /* Company / Airline Filter Grid: Department/Division, Employee/Crew Member */
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                    {/* Department / Division Filter */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        {activeOrg?.type === 'airline' ? 'Division / Fleet:' : 'Department & Team:'}
+                      </label>
+                      <select
+                        value={filterDept}
+                        onChange={(e) => {
+                          triggerHaptic(5);
+                          setFilterDept(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        <option value="all">
+                          {activeOrg?.type === 'airline' ? 'All Divisions & Fleets' : 'All Departments & Teams'}
+                        </option>
+                        {departmentsList.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name} ({d.code})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
-                  {/* Class / Section Filter */}
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                      Class / Section:
-                    </label>
-                    <select
-                      value={filterClass}
-                      onChange={(e) => {
-                        triggerHaptic(5);
-                        setFilterClass(e.target.value);
-                      }}
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
-                    >
-                      <option value="all">All Classes</option>
-                      {availableClasses.map((cls) => (
-                        <option key={cls} value={cls}>
-                          Class {cls}
+                    {/* Employee / Crew Filter */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        {activeOrg?.type === 'airline' ? 'Aviation Crew Member:' : 'Assigned Employee:'}
+                      </label>
+                      <select
+                        value={filterTeacher}
+                        onChange={(e) => {
+                          triggerHaptic(5);
+                          setFilterTeacher(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      >
+                        <option value="all">
+                          {activeOrg?.type === 'airline' ? 'All Aviation Crew' : 'All Employees'} ({people.length})
                         </option>
-                      ))}
-                    </select>
+                        {people.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} ({p.role_title})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Active Filter Helper Badge */}
+                    <div className="flex items-end pb-1 text-xs text-slate-400">
+                      <span>Viewing all operational assignments across configured shifts.</span>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
 
 
@@ -4386,39 +4581,57 @@ export const ScheduleModule: React.FC = () => {
             </div>
 
             <div className="space-y-3">
-              {/* Subject Selection */}
+              {/* Subject Selection (College) vs Duty Assignment (Company/Airline) */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Subject / Course:
+                  {activeOrg?.type === 'college'
+                    ? 'Subject / Course:'
+                    : activeOrg?.type === 'airline'
+                    ? 'Flight Duty / Mission:'
+                    : 'Assigned Duty / Task:'}
                 </label>
-                {subjectsList.length > 0 ? (
-                  <select
-                    value={editSlotSubjectId || ''}
-                    onChange={(e) => {
-                      const sId = e.target.value ? Number(e.target.value) : undefined;
-                      setEditSlotSubjectId(sId);
-                      const sObj = subjectsList.find((s) => s.id === sId);
-                      if (sObj) {
-                        setEditSlotSubjectName(sObj.name);
-                        if (sObj.semester) setEditSlotSemester(sObj.semester);
-                        if (sObj.class_name) setEditSlotClass(sObj.class_name);
-                      }
-                    }}
-                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-semibold"
-                  >
-                    <option value="">-- Custom / Unassigned Subject --</option>
-                    {subjectsList.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.code} - {s.name} ({s.semester || 'All'}, {s.is_lab ? 'Lab' : 'Theory'})
-                      </option>
-                    ))}
-                  </select>
+                {activeOrg?.type === 'college' ? (
+                  subjectsList.length > 0 ? (
+                    <select
+                      value={editSlotSubjectId || ''}
+                      onChange={(e) => {
+                        const sId = e.target.value ? Number(e.target.value) : undefined;
+                        setEditSlotSubjectId(sId);
+                        const sObj = subjectsList.find((s) => s.id === sId);
+                        if (sObj) {
+                          setEditSlotSubjectName(sObj.name);
+                          if (sObj.semester) setEditSlotSemester(sObj.semester);
+                          if (sObj.class_name) setEditSlotClass(sObj.class_name);
+                        }
+                      }}
+                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-semibold"
+                    >
+                      <option value="">-- Custom / Unassigned Subject --</option>
+                      {subjectsList.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.code} - {s.name} ({s.semester || 'All'}, {s.is_lab ? 'Lab' : 'Theory'})
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={editSlotSubjectName}
+                      onChange={(e) => setEditSlotSubjectName(e.target.value)}
+                      placeholder="Enter subject title (e.g. Operating Systems)"
+                      className="w-full px-3.5 py-2 rounded-xl glass-input text-xs font-semibold"
+                    />
+                  )
                 ) : (
                   <input
                     type="text"
                     value={editSlotSubjectName}
                     onChange={(e) => setEditSlotSubjectName(e.target.value)}
-                    placeholder="Enter subject title (e.g. Operating Systems)"
+                    placeholder={
+                      activeOrg?.type === 'airline'
+                        ? 'Enter flight duty (e.g. Flight Captain - AI-202)'
+                        : 'Enter duty or task (e.g. Backend Architecture, Customer Support)'
+                    }
                     className="w-full px-3.5 py-2 rounded-xl glass-input text-xs font-semibold"
                   />
                 )}

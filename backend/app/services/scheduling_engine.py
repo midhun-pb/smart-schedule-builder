@@ -227,9 +227,36 @@ class SchedulingEngine:
                     disqualification_reasons[(s_idx, p_idx)] = "On leave or unavailable"
                     continue
 
-                # If this slot was explicitly provisioned for this person, they are qualified
+                # 1b. Working days
+                prefs = person.get("preferences") or {}
+                p_work_days = prefs.get("working_days") or prefs.get("allowed_working_days")
+                slot_day = slot.get("day_of_week")
+                if p_work_days is not None and slot_day is not None and slot_day not in p_work_days:
+                    disqualification_reasons[(s_idx, p_idx)] = f"Day {slot_day} not an allowed working day for this employee"
+                    continue
+
+                # If this slot was explicitly provisioned for this person, they are qualified immediately
                 if slot_target_pid and slot_target_pid == p_id:
                     eligible_candidates[s_idx].append(p_idx)
+                    continue
+
+                if slot_target_pid and slot_target_pid != p_id:
+                    # Slot was provisioned for specific employee/faculty
+                    # Only allow other staff if target person is unavailable or on leave
+                    target_person = next((p for p in people if p.get("id") == slot_target_pid), None)
+                    if target_person and not self._is_on_leave(slot_target_pid, slot, leave_records):
+                        disqualification_reasons[(s_idx, p_idx)] = f"Slot reserved for target personnel #{slot_target_pid}"
+                        continue
+
+                p_start = prefs.get("start_time") or prefs.get("working_hours_start")
+                p_end = prefs.get("end_time") or prefs.get("working_hours_end")
+                slot_start = slot.get("start_time")
+                slot_end = slot.get("end_time")
+                if p_start and slot_start and slot_start < p_start:
+                    disqualification_reasons[(s_idx, p_idx)] = f"Slot starts at {slot_start}, earlier than working hours ({p_start}-{p_end})"
+                    continue
+                if p_end and slot_end and slot_end > p_end:
+                    disqualification_reasons[(s_idx, p_idx)] = f"Slot ends at {slot_end}, later than working hours ({p_start}-{p_end})"
                     continue
 
                 # Faculty vs General Employee distinction for academic courses
@@ -315,9 +342,16 @@ class SchedulingEngine:
         ]
 
         # Hard Constraint: No person can have overlapping slots (supports overnight & cross-day)
+        # And enforces minimum rest periods between shifts (e.g. 10-12 hours for aviation/company)
         for p_idx in range(num_people):
             cand_slots = [s_idx for s_idx in range(num_slots) if p_idx in eligible_candidates[s_idx]]
             num_cand = len(cand_slots)
+            p_prefs = people[p_idx].get("preferences") or {}
+            min_rest_hours = p_prefs.get("min_rest_hours", 0)
+            if not min_rest_hours:
+                if people[p_idx].get("profession_type") in ["airline", "aviation"]:
+                    min_rest_hours = 10.0
+
             for i in range(num_cand):
                 s1_idx = cand_slots[i]
                 s1_start, s1_end, _ = slot_intervals[s1_idx]
@@ -327,6 +361,16 @@ class SchedulingEngine:
 
                     if is_overlapping_interval(s1_start, s1_end, s2_start, s2_end):
                         model.Add(x[(s1_idx, p_idx)] + x[(s2_idx, p_idx)] <= 1)
+                    elif min_rest_hours and min_rest_hours > 0:
+                        min_rest_secs = min_rest_hours * 3600
+                        if s2_start >= s1_end:
+                            rest_dur = (s2_start - s1_end).total_seconds()
+                            if rest_dur < min_rest_secs:
+                                model.Add(x[(s1_idx, p_idx)] + x[(s2_idx, p_idx)] <= 1)
+                        elif s1_start >= s2_end:
+                            rest_dur = (s1_start - s2_end).total_seconds()
+                            if rest_dur < min_rest_secs:
+                                model.Add(x[(s1_idx, p_idx)] + x[(s2_idx, p_idx)] <= 1)
 
         # Hard Constraint: No student class/section can be scheduled for two subjects at the same time
         class_slots: Dict[str, List[int]] = {}

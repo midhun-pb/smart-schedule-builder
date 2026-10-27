@@ -115,6 +115,14 @@ export const OrgSelectionModule: React.FC = () => {
   const [quickSubSemester, setQuickSubSemester] = useState<string>('S1');
   const [quickSubDeptId, setQuickSubDeptId] = useState<number | undefined>(undefined);
 
+  // Company and Airline specific staff fields
+  const [personSkills, setPersonSkills] = useState<string>('');
+  const [personDuty, setPersonDuty] = useState<string>('');
+  const [personWorkDays, setPersonWorkDays] = useState<number[]>([0, 1, 2, 3, 4]);
+  const [personStartTime, setPersonStartTime] = useState<string>('09:00');
+  const [personEndTime, setPersonEndTime] = useState<string>('17:00');
+  const [personRestHours, setPersonRestHours] = useState<number>(11);
+
   // STEP 4 State: Subjects / Duties
   const [subjectsList, setSubjectsList] = useState<Subject[]>([]);
   const [subName, setSubName] = useState<string>('');
@@ -582,100 +590,150 @@ export const OrgSelectionModule: React.FC = () => {
   // STEP 3: Add / Update Employee or Teacher
   const handleAddPerson = async () => {
     triggerHaptic(10);
+    const typeLabel = selectedType === 'college' ? 'Teacher' : selectedType === 'airline' ? 'Crew Member' : 'Employee';
     if (!personName.trim() || !createdOrgId) {
-      addToast('Validation Error', 'Please enter Teacher / Employee Name', 'error');
+      addToast('Validation Error', `Please enter ${typeLabel} Name`, 'error');
       return;
     }
 
     try {
-      // Auto-save any pending newly entered subjects across assignment rows before saving teacher
-      let currentSubs = [...subjectsList];
-      for (let i = 0; i < step3Assignments.length; i++) {
-        const row = step3Assignments[i];
-        if (!row.subject_id && row.new_subject_name?.trim()) {
-          const name = row.new_subject_name.trim();
-          const code =
-            row.new_subject_code?.trim().toUpperCase() ||
-            name.replace(/[^A-Za-z0-9]/g, '').slice(0, 5).toUpperCase() ||
-            'SUB';
-          const deptId = row.department_id || personDeptId || (departmentsList[0]?.id ?? undefined);
-          const newSub = await api.createSubject(createdOrgId, {
-            name: name,
-            code: code,
-            department_id: deptId,
-            semester: row.semester || 'S1',
-            required_hours_per_week: row.required_periods || 4,
-            is_lab: false,
-          });
-          row.subject_id = newSub.id;
-          row.is_creating_new = false;
-          row.new_subject_name = '';
-          row.new_subject_code = '';
-          if (!currentSubs.some((s) => s.id === newSub.id)) {
-            currentSubs.push(newSub);
+      let assignmentsPayload: any[] = [];
+      let skillsArray: any[] = [];
+      let prefsObj: any = {};
+
+      if (selectedType === 'college') {
+        // Auto-save any pending newly entered subjects across assignment rows before saving teacher
+        let currentSubs = [...subjectsList];
+        for (let i = 0; i < step3Assignments.length; i++) {
+          const row = step3Assignments[i];
+          if (!row.subject_id && row.new_subject_name?.trim()) {
+            const name = row.new_subject_name.trim();
+            const code =
+              row.new_subject_code?.trim().toUpperCase() ||
+              name.replace(/[^A-Za-z0-9]/g, '').slice(0, 5).toUpperCase() ||
+              'SUB';
+            const deptId = row.department_id || personDeptId || (departmentsList[0]?.id ?? undefined);
+            const newSub = await api.createSubject(createdOrgId, {
+              name: name,
+              code: code,
+              department_id: deptId,
+              semester: row.semester || 'S1',
+              required_hours_per_week: row.required_periods || 4,
+              is_lab: false,
+            });
+            row.subject_id = newSub.id;
+            row.is_creating_new = false;
+            row.new_subject_name = '';
+            row.new_subject_code = '';
+            if (!currentSubs.some((s) => s.id === newSub.id)) {
+              currentSubs.push(newSub);
+            }
           }
         }
-      }
-      setSubjectsList(currentSubs);
+        setSubjectsList(currentSubs);
 
-      const skillsArray =
-        selectedType === 'college'
-          ? [{ name: 'Teaching', level: 'Expert', verified: true, years: 5 }]
-          : [{ name: 'Operations', level: 'Intermediate', verified: true, years: 3 }];
-
-      // In college mode, automatically include assigned subjects in skills for compatibility
-      const assignedSubjIds = step3Assignments.map((a) => a.subject_id).filter(Boolean);
-      const assignedSubjects = currentSubs.filter((s) => assignedSubjIds.includes(s.id));
-      for (const as of assignedSubjects) {
-        if (!skillsArray.some((sk) => sk.name.toLowerCase() === as.name.toLowerCase())) {
-          skillsArray.push({
-            name: as.name,
-            level: 'Expert',
-            verified: true,
-            years: 5.0,
-          });
+        skillsArray = [{ name: 'Teaching & Pedagogy', level: 'Expert', verified: true, years: 5 }];
+        const assignedSubjIds = step3Assignments.map((a) => a.subject_id).filter(Boolean);
+        const assignedSubjects = currentSubs.filter((s) => assignedSubjIds.includes(s.id));
+        for (const as of assignedSubjects) {
+          if (!skillsArray.some((sk) => sk.name.toLowerCase() === as.name.toLowerCase())) {
+            skillsArray.push({
+              name: as.name,
+              level: 'Expert',
+              verified: true,
+              years: 5.0,
+            });
+          }
         }
+
+        assignmentsPayload = step3Assignments
+          .filter((r) => r.subject_id)
+          .map((r) => {
+            const sub = subjectsList.find((s) => s.id === r.subject_id);
+            const semObj = semestersList.find((s) => s.code === r.semester);
+            const prefList = r.preferred_periods
+              ? r.preferred_periods.split(',').map((p) => p.trim()).filter(Boolean)
+              : [];
+
+            return {
+              id: r.id,
+              subject_id: r.subject_id,
+              semester: r.semester || sub?.semester || 'S1',
+              semester_id: semObj?.id || sub?.semester_id,
+              department_id: r.department_id || personDeptId || sub?.department_id,
+              class_name: r.class_name || sub?.class_name || null,
+              required_periods: r.required_periods || 4,
+              required_hours: (r.required_periods || 4) * 1.0,
+              period_duration: r.period_duration || '1 hour',
+              allowed_working_days: r.allowed_working_days || DEFAULT_DAYS,
+              preferred_periods: prefList,
+              max_periods_per_day: 2,
+              assignment_status: 'active',
+            };
+          });
+
+        prefsObj = {
+          working_days: DEFAULT_DAYS,
+          is_faculty: true,
+        };
+      } else if (selectedType === 'airline') {
+        const enteredSkills = personSkills
+          ? personSkills.split(',').map((s) => ({ name: s.trim(), level: 'Expert', verified: true, years: 5 })).filter((s) => s.name)
+          : [
+              { name: 'Commercial Flight Ops', level: 'Expert', verified: true, years: 6 },
+              { name: 'Crew Resource Management', level: 'Expert', verified: true, years: 5 },
+            ];
+        skillsArray = enteredSkills;
+
+        prefsObj = {
+          working_days: personWorkDays,
+          flight_duty: personDuty.trim() || `${personRole || 'Flight Crew'} Duty`,
+          duty: personDuty.trim() || `${personRole || 'Flight Crew'} Duty`,
+          min_rest_hours: personRestHours || 12,
+          preferred_shifts: ['morning', 'afternoon'],
+        };
+      } else {
+        // Company / Office
+        const enteredSkills = personSkills
+          ? personSkills.split(',').map((s) => ({ name: s.trim(), level: 'Expert', verified: true, years: 4 })).filter((s) => s.name)
+          : [
+              { name: 'Software Development', level: 'Expert', verified: true, years: 4 },
+              { name: 'Agile Operations', level: 'Advanced', verified: true, years: 3 },
+            ];
+        skillsArray = enteredSkills;
+
+        prefsObj = {
+          working_days: personWorkDays,
+          start_time: personStartTime,
+          end_time: personEndTime,
+          duty: personDuty.trim() || `${personRole || 'Operational'} Duty`,
+          min_rest_hours: personRestHours || 11,
+        };
       }
 
-      // Build assignments payload
-      const assignmentsPayload = step3Assignments
-        .filter((r) => r.subject_id)
-        .map((r) => {
-          const sub = subjectsList.find((s) => s.id === r.subject_id);
-          const semObj = semestersList.find((s) => s.code === r.semester);
-          const prefList = r.preferred_periods
-            ? r.preferred_periods.split(',').map((p) => p.trim()).filter(Boolean)
-            : [];
+      const defaultEmailDomain =
+        selectedType === 'college' ? 'institution.edu' : selectedType === 'airline' ? 'airline.aero' : 'company.com';
+      const codePrefix =
+        selectedType === 'college' ? 'FAC' : selectedType === 'airline' ? 'CREW' : 'EMP';
 
-          return {
-            id: r.id,
-            subject_id: r.subject_id,
-            semester: r.semester || sub?.semester || 'S1',
-            semester_id: semObj?.id || sub?.semester_id,
-            department_id: r.department_id || personDeptId || sub?.department_id,
-            class_name: r.class_name || sub?.class_name || null,
-            required_periods: r.required_periods || 4,
-            required_hours: (r.required_periods || 4) * 1.0,
-            period_duration: r.period_duration || '1 hour',
-            allowed_working_days: r.allowed_working_days || DEFAULT_DAYS,
-            preferred_periods: prefList,
-            max_periods_per_day: 2,
-            assignment_status: 'active',
-          };
-        });
+      const defaultRole =
+        selectedType === 'college' ? 'Assistant Professor' : selectedType === 'airline' ? 'Captain' : 'Software Engineer';
 
       const payload = {
         org_id: createdOrgId,
         name: personName.trim(),
-        email: personEmail.trim() || `${personName.toLowerCase().replace(/[^a-z0-9]/g, '.')}@institution.edu`,
-        role_title: personRole || (selectedType === 'college' ? 'Assistant Professor' : 'Staff'),
-        employee_code: `FAC-${Math.floor(100 + Math.random() * 900)}`,
+        email: personEmail.trim() || `${personName.toLowerCase().replace(/[^a-z0-9]/g, '.')}@${defaultEmailDomain}`,
+        role_title: personRole.trim() || defaultRole,
+        employee_code: `${codePrefix}-${Math.floor(100 + Math.random() * 900)}`,
         department_id: personDeptId || (departmentsList[0]?.id ?? undefined),
         profession_type: selectedType,
-        qualifications: personQuals ? personQuals.split(',').map((s) => s.trim()).filter(Boolean) : ['B.Tech'],
+        qualifications: personQuals ? personQuals.split(',').map((s) => s.trim()).filter(Boolean) : [selectedType === 'college' ? 'M.Tech' : selectedType === 'airline' ? 'ATPL B737' : 'B.Tech'],
         skills: skillsArray,
+        preferences: prefsObj,
         profession_metadata: {
-          semesters: Array.from(new Set(step3Assignments.map((a) => a.semester).filter(Boolean))),
+          org_type: selectedType,
+          semesters: selectedType === 'college' ? Array.from(new Set(step3Assignments.map((a) => a.semester).filter(Boolean))) : [],
+          is_faculty: selectedType === 'college',
         },
         max_hours_per_week: personWeeklyHours,
         status: 'active',
@@ -685,33 +743,24 @@ export const OrgSelectionModule: React.FC = () => {
       if (editingPersonId) {
         await api.updatePerson(editingPersonId, payload);
         addToast(
-          'Teacher Updated',
-          `${personName} updated with ${assignmentsPayload.length} semester assignment(s).`,
+          `${typeLabel} Updated`,
+          `${personName} profile updated successfully.`,
           'success'
         );
       } else {
         const newP = await api.createPerson(payload);
         addToast(
-          'Teacher Registered',
-          `${newP.name} added with ${assignmentsPayload.length} semester assignment(s).`,
+          `${typeLabel} Registered`,
+          `${newP.name} registered into organization roster.`,
           'success'
         );
       }
 
       const updated = await api.getPeople({ org_id: createdOrgId });
       setPeopleList(updated);
-
-      // Reset form
-      setEditingPersonId(null);
-      setPersonName('');
-      setPersonEmail('');
-      setPersonRole('Assistant Professor');
-      setPersonQuals('M.Tech');
-      setPersonWeeklyHours(36);
-      setStep3Assignments([]);
-      setCollapsedAssignments({});
+      handleCancelEdit();
     } catch (err: any) {
-      addToast('Error', err.message || 'Failed to save teacher', 'error');
+      addToast('Error', err.message || `Failed to save ${typeLabel}`, 'error');
     }
   };
 
@@ -720,10 +769,18 @@ export const OrgSelectionModule: React.FC = () => {
     setEditingPersonId(p.id);
     setPersonName(p.name || '');
     setPersonEmail(p.email || '');
-    setPersonRole(p.role_title || 'Assistant Professor');
+    setPersonRole(p.role_title || (selectedType === 'college' ? 'Assistant Professor' : selectedType === 'airline' ? 'Captain' : 'Software Engineer'));
     setPersonDeptId(p.department_id);
     setPersonQuals((p.qualifications || []).join(', '));
-    setPersonWeeklyHours(p.max_hours_per_week || 36);
+    setPersonWeeklyHours(p.max_hours_per_week || (selectedType === 'company' ? 40 : 36));
+
+    const prefs = (p as any).preferences || {};
+    setPersonDuty(prefs.duty || prefs.flight_duty || '');
+    setPersonWorkDays(prefs.working_days || prefs.allowed_working_days || (selectedType === 'airline' ? [0, 1, 2, 3, 4, 5, 6] : [0, 1, 2, 3, 4]));
+    setPersonStartTime(prefs.start_time || prefs.working_hours_start || '09:00');
+    setPersonEndTime(prefs.end_time || prefs.working_hours_end || '17:00');
+    setPersonRestHours(prefs.min_rest_hours || (selectedType === 'airline' ? 12 : 11));
+    setPersonSkills((p.skills || []).map((s: any) => typeof s === 'string' ? s : s.name).join(', '));
 
     try {
       let assignments = p.teacher_assignments;
@@ -761,9 +818,15 @@ export const OrgSelectionModule: React.FC = () => {
     setEditingPersonId(null);
     setPersonName('');
     setPersonEmail('');
-    setPersonRole('Assistant Professor');
-    setPersonQuals('M.Tech');
-    setPersonWeeklyHours(36);
+    setPersonRole(selectedType === 'college' ? 'Assistant Professor' : selectedType === 'airline' ? 'Captain' : 'Software Engineer');
+    setPersonQuals(selectedType === 'college' ? 'M.Tech' : selectedType === 'airline' ? 'ATPL B737' : 'B.Tech, PMP');
+    setPersonWeeklyHours(selectedType === 'company' ? 40 : 36);
+    setPersonSkills('');
+    setPersonDuty('');
+    setPersonWorkDays(selectedType === 'airline' ? [0, 1, 2, 3, 4, 5, 6] : [0, 1, 2, 3, 4]);
+    setPersonStartTime('09:00');
+    setPersonEndTime('17:00');
+    setPersonRestHours(selectedType === 'airline' ? 12 : 11);
     setStep3Assignments([]);
     setCollapsedAssignments({});
   };
@@ -1555,13 +1618,19 @@ export const OrgSelectionModule: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                    <GraduationCap className="w-5 h-5 text-blue-600" />
-                    <span>Step 3: {selectedType === 'college' ? 'Faculty & Teachers' : 'Staff & Personnel'}</span>
+                    {selectedType === 'college' && <GraduationCap className="w-5 h-5 text-blue-600" />}
+                    {selectedType === 'company' && <Briefcase className="w-5 h-5 text-blue-600" />}
+                    {selectedType === 'airline' && <Plane className="w-5 h-5 text-blue-600" />}
+                    <span>
+                      Step 3: {selectedType === 'college' ? 'Faculty & Teachers' : selectedType === 'airline' ? 'Aviation Personnel & Crew' : 'Employees & Staff'}
+                    </span>
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
                     {selectedType === 'college'
-                      ? 'Register teachers and assign their semester-wise subjects, teaching periods, and working hours.'
-                      : 'Add employees with their qualifications, department, and weekly work limits.'}
+                      ? 'Register faculty and assign their semester-wise subjects, teaching periods, and working hours.'
+                      : selectedType === 'airline'
+                      ? 'Register flight crew members, ratings/licenses, operational duties, and mandatory rest periods.'
+                      : 'Register company employees, job roles, professional skills, shift hours (e.g. 9 AM - 5 PM), and working days.'}
                   </p>
                 </div>
                 {peopleList.length === 0 && (
@@ -1582,7 +1651,9 @@ export const OrgSelectionModule: React.FC = () => {
                   <div className="p-3.5 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-between text-xs text-blue-700 dark:text-blue-300">
                     <div className="flex items-center gap-2 font-bold">
                       <Edit2 className="w-4 h-4 text-blue-600" />
-                      <span>Editing Teacher: {personName}</span>
+                      <span>
+                        Editing {selectedType === 'college' ? 'Teacher' : selectedType === 'airline' ? 'Crew Member' : 'Employee'}: {personName}
+                      </span>
                     </div>
                     <button
                       type="button"
@@ -1597,101 +1668,487 @@ export const OrgSelectionModule: React.FC = () => {
                 <div className="border-b border-slate-200/50 dark:border-slate-800/80 pb-3 flex items-center justify-between">
                   <div>
                     <h3 className="font-extrabold text-sm text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
-                      <BookOpen className="w-4 h-4 text-blue-600" />
-                      <span>{editingPersonId ? 'EDIT TEACHER DETAILS' : 'TEACHER DETAILS'}</span>
+                      {selectedType === 'college' ? <BookOpen className="w-4 h-4 text-blue-600" /> : selectedType === 'airline' ? <Plane className="w-4 h-4 text-blue-600" /> : <Briefcase className="w-4 h-4 text-blue-600" />}
+                      <span>
+                        {editingPersonId
+                          ? selectedType === 'college'
+                            ? 'EDIT TEACHER DETAILS'
+                            : selectedType === 'airline'
+                            ? 'EDIT AVIATION CREW DETAILS'
+                            : 'EDIT EMPLOYEE DETAILS'
+                          : selectedType === 'college'
+                          ? 'TEACHER DETAILS'
+                          : selectedType === 'airline'
+                          ? 'AVIATION CREW DETAILS'
+                          : 'EMPLOYEE DETAILS'}
+                      </span>
                     </h3>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      Configure teacher personal info and assign their individual semester subjects directly below.
+                      {selectedType === 'college'
+                        ? 'Configure teacher personal info and assign their individual semester subjects directly below.'
+                        : selectedType === 'airline'
+                        ? 'Configure crew member, operational division, aviation rating, assigned flight duties, and rest regulations.'
+                        : 'Configure employee details, department/team, job role, professional skills, duty assignments, shift hours, and working days.'}
                     </p>
                   </div>
                 </div>
 
-                {/* Section 1: Teacher Basic Info */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                      Teacher Name *
-                    </label>
-                    <input
-                      type="text"
-                      value={personName}
-                      onChange={(e) => setPersonName(e.target.value)}
-                      placeholder="e.g. Dr. Eleanor Vance"
-                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
-                    />
-                  </div>
+                {/* ========================================================= */}
+                {/* 1. UNIVERSITY / COLLEGE FACULTY FORM                      */}
+                {/* ========================================================= */}
+                {selectedType === 'college' && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Teacher Name *
+                      </label>
+                      <input
+                        type="text"
+                        value={personName}
+                        onChange={(e) => setPersonName(e.target.value)}
+                        placeholder="e.g. Dr. Eleanor Vance"
+                        className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                      />
+                    </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                      Department *
-                    </label>
-                    <select
-                      value={personDeptId || ''}
-                      onChange={(e) => setPersonDeptId(e.target.value ? Number(e.target.value) : undefined)}
-                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
-                    >
-                      <option value="">-- Select Department --</option>
-                      {departmentsList.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Department *
+                      </label>
+                      <select
+                        value={personDeptId || ''}
+                        onChange={(e) => setPersonDeptId(e.target.value ? Number(e.target.value) : undefined)}
+                        className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                      >
+                        <option value="">-- Select Department --</option>
+                        {departmentsList.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                      Designation / Role
-                    </label>
-                    <input
-                      type="text"
-                      value={personRole}
-                      onChange={(e) => setPersonRole(e.target.value)}
-                      placeholder="e.g. Assistant Professor"
-                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
-                    />
-                  </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Designation / Role
+                      </label>
+                      <input
+                        type="text"
+                        value={personRole}
+                        onChange={(e) => setPersonRole(e.target.value)}
+                        placeholder="e.g. Assistant Professor"
+                        className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                      />
+                    </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                      Email Address
-                    </label>
-                    <input
-                      type="email"
-                      value={personEmail}
-                      onChange={(e) => setPersonEmail(e.target.value)}
-                      placeholder="e.g. teacher@institution.edu"
-                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
-                    />
-                  </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Email Address
+                      </label>
+                      <input
+                        type="email"
+                        value={personEmail}
+                        onChange={(e) => setPersonEmail(e.target.value)}
+                        placeholder="e.g. teacher@institution.edu"
+                        className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                      />
+                    </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                      Qualifications
-                    </label>
-                    <input
-                      type="text"
-                      value={personQuals}
-                      onChange={(e) => setPersonQuals(e.target.value)}
-                      placeholder="e.g. M.Tech, Ph.D"
-                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
-                    />
-                  </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Qualifications
+                      </label>
+                      <input
+                        type="text"
+                        value={personQuals}
+                        onChange={(e) => setPersonQuals(e.target.value)}
+                        placeholder="e.g. M.Tech, Ph.D"
+                        className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                      />
+                    </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
-                      Max Weekly Hours
-                    </label>
-                    <input
-                      type="number"
-                      value={personWeeklyHours}
-                      min="5"
-                      max="60"
-                      onChange={(e) => setPersonWeeklyHours(Number(e.target.value))}
-                      className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
-                    />
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Max Weekly Hours
+                      </label>
+                      <input
+                        type="number"
+                        value={personWeeklyHours}
+                        min="5"
+                        max="60"
+                        onChange={(e) => setPersonWeeklyHours(Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* 2. COMPANY / OFFICE EMPLOYEE FORM                         */}
+                {/* ========================================================= */}
+                {selectedType === 'company' && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Employee Name *
+                        </label>
+                        <input
+                          type="text"
+                          value={personName}
+                          onChange={(e) => setPersonName(e.target.value)}
+                          placeholder="e.g. Sarah Jenkins"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Department / Team *
+                        </label>
+                        <select
+                          value={personDeptId || ''}
+                          onChange={(e) => setPersonDeptId(e.target.value ? Number(e.target.value) : undefined)}
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        >
+                          <option value="">-- Select Team / Department --</option>
+                          {departmentsList.map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Job Role *
+                        </label>
+                        <input
+                          type="text"
+                          value={personRole}
+                          onChange={(e) => setPersonRole(e.target.value)}
+                          placeholder="e.g. Software Engineer / Operations Specialist"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Work Email
+                        </label>
+                        <input
+                          type="email"
+                          value={personEmail}
+                          onChange={(e) => setPersonEmail(e.target.value)}
+                          placeholder="e.g. employee@company.com"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Professional Skills & Qualifications
+                        </label>
+                        <input
+                          type="text"
+                          value={personSkills}
+                          onChange={(e) => setPersonSkills(e.target.value)}
+                          placeholder="e.g. Python, SQL, Cloud Architecture, Customer Support"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Primary Duty / Assignment Title
+                        </label>
+                        <input
+                          type="text"
+                          value={personDuty}
+                          onChange={(e) => setPersonDuty(e.target.value)}
+                          placeholder="e.g. Product Engineering / Support Operations"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 pt-1">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Daily Work Start Time
+                        </label>
+                        <input
+                          type="time"
+                          value={personStartTime}
+                          onChange={(e) => setPersonStartTime(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Daily Work End Time
+                        </label>
+                        <input
+                          type="time"
+                          value={personEndTime}
+                          onChange={(e) => setPersonEndTime(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Max Weekly Hours
+                        </label>
+                        <input
+                          type="number"
+                          value={personWeeklyHours}
+                          min="10"
+                          max="60"
+                          onChange={(e) => setPersonWeeklyHours(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Min Rest Between Shifts (Hrs)
+                        </label>
+                        <input
+                          type="number"
+                          value={personRestHours}
+                          min="8"
+                          max="24"
+                          onChange={(e) => setPersonRestHours(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                        Assigned Working Days:
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        {DAY_LABELS.map(({ label, day }) => {
+                          const isSelected = personWorkDays.includes(day);
+                          return (
+                            <button
+                              key={day}
+                              type="button"
+                              onClick={() => {
+                                const updated = isSelected
+                                  ? personWorkDays.filter((d) => d !== day)
+                                  : [...personWorkDays, day].sort();
+                                setPersonWorkDays(updated);
+                              }}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                                isSelected
+                                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                  : 'bg-white/40 dark:bg-slate-800/40 text-slate-500 border-slate-200/50 dark:border-slate-700/50 hover:bg-slate-100'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-1">
+                        GLIXON schedules this employee strictly during their configured working days and daily hours ({personStartTime}–{personEndTime}).
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* 3. AVIATION / AIRLINE CREW MEMBER FORM                    */}
+                {/* ========================================================= */}
+                {selectedType === 'airline' && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Crew Member Name *
+                        </label>
+                        <input
+                          type="text"
+                          value={personName}
+                          onChange={(e) => setPersonName(e.target.value)}
+                          placeholder="e.g. Capt. James Sullivan"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Operations Division *
+                        </label>
+                        <select
+                          value={personDeptId || ''}
+                          onChange={(e) => setPersonDeptId(e.target.value ? Number(e.target.value) : undefined)}
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        >
+                          <option value="">-- Select Flight Operations Division --</option>
+                          {departmentsList.map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Aviation Crew Role *
+                        </label>
+                        <select
+                          value={personRole}
+                          onChange={(e) => setPersonRole(e.target.value)}
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-semibold"
+                        >
+                          <option value="Captain / Pilot in Command">Captain / Pilot in Command</option>
+                          <option value="First Officer / Co-Pilot">First Officer / Co-Pilot</option>
+                          <option value="Lead Flight Attendant">Lead Flight Attendant</option>
+                          <option value="Cabin Crew Specialist">Cabin Crew Specialist</option>
+                          <option value="Flight Dispatcher">Flight Dispatcher</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Official Aviation Email
+                        </label>
+                        <input
+                          type="email"
+                          value={personEmail}
+                          onChange={(e) => setPersonEmail(e.target.value)}
+                          placeholder="e.g. crew@airline.aero"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Verified Ratings & Type Certificates
+                        </label>
+                        <input
+                          type="text"
+                          value={personSkills}
+                          onChange={(e) => setPersonSkills(e.target.value)}
+                          placeholder="e.g. ATP, B737-800 Type Rating, FAA First Class Medical"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Flight Duty Assignment
+                        </label>
+                        <input
+                          type="text"
+                          value={personDuty}
+                          onChange={(e) => setPersonDuty(e.target.value)}
+                          placeholder="e.g. Domestic Flight Ops / B737 Route"
+                          className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 pt-1">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Flight Duty Window Start
+                        </label>
+                        <input
+                          type="time"
+                          value={personStartTime}
+                          onChange={(e) => setPersonStartTime(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Flight Duty Window End
+                        </label>
+                        <input
+                          type="time"
+                          value={personEndTime}
+                          onChange={(e) => setPersonEndTime(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Max Flying Hours / Wk
+                        </label>
+                        <input
+                          type="number"
+                          value={personWeeklyHours}
+                          min="10"
+                          max="40"
+                          onChange={(e) => setPersonWeeklyHours(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          Mandatory Rest Requirement (Hrs)
+                        </label>
+                        <input
+                          type="number"
+                          value={personRestHours}
+                          min="10"
+                          max="24"
+                          onChange={(e) => setPersonRestHours(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                        Operating Flight Days:
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        {DAY_LABELS.map(({ label, day }) => {
+                          const isSelected = personWorkDays.includes(day);
+                          return (
+                            <button
+                              key={day}
+                              type="button"
+                              onClick={() => {
+                                const updated = isSelected
+                                  ? personWorkDays.filter((d) => d !== day)
+                                  : [...personWorkDays, day].sort();
+                                setPersonWorkDays(updated);
+                              }}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                                isSelected
+                                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                  : 'bg-white/40 dark:bg-slate-800/40 text-slate-500 border-slate-200/50 dark:border-slate-700/50 hover:bg-slate-100'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-1">
+                        GLIXON enforces FAA/ICAO mandatory minimum {personRestHours}-hour rest periods between flight duties.
+                      </p>
+                    </div>
+                  </div>
+                )}
 
                 {/* Section 2: SUBJECTS AND SEMESTERS ASSIGNED TO THIS TEACHER */}
                 {selectedType === 'college' && (
@@ -2163,12 +2620,24 @@ export const OrgSelectionModule: React.FC = () => {
                     {editingPersonId ? (
                       <>
                         <Check className="w-4 h-4" />
-                        <span>Update Teacher</span>
+                        <span>
+                          {selectedType === 'college'
+                            ? 'Update Teacher'
+                            : selectedType === 'airline'
+                            ? 'Update Crew Member'
+                            : 'Update Employee'}
+                        </span>
                       </>
                     ) : (
                       <>
                         <Plus className="w-4 h-4" />
-                        <span>Add {selectedType === 'college' ? 'Teacher' : 'Employee'}</span>
+                        <span>
+                          {selectedType === 'college'
+                            ? 'Add Teacher'
+                            : selectedType === 'airline'
+                            ? 'Add Crew Member'
+                            : 'Add Employee'}
+                        </span>
                       </>
                     )}
                   </button>
@@ -2179,13 +2648,21 @@ export const OrgSelectionModule: React.FC = () => {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                    Registered Faculty & Staff Members ({peopleList.length})
+                    {selectedType === 'college'
+                      ? `Registered Faculty & Teachers (${peopleList.length})`
+                      : selectedType === 'airline'
+                      ? `Registered Aviation Personnel & Crew (${peopleList.length})`
+                      : `Registered Company Employees (${peopleList.length})`}
                   </div>
                 </div>
 
                 {peopleList.length === 0 ? (
                   <div className="p-6 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 text-center text-xs text-slate-400">
-                    No employees added yet. Click 'Add Sample Staff' or register teachers using the form above.
+                    {selectedType === 'college'
+                      ? "No teachers registered yet. Click 'Add Sample Staff' or configure faculty above."
+                      : selectedType === 'airline'
+                      ? "No aviation crew registered yet. Click 'Add Sample Staff' or register flight crew above."
+                      : "No employees registered yet. Click 'Add Sample Staff' or add employees above."}
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -2223,7 +2700,7 @@ export const OrgSelectionModule: React.FC = () => {
                                 type="button"
                                 onClick={() => handleStartEditPerson(p)}
                                 className="p-1.5 rounded-lg hover:bg-blue-500/10 text-blue-600 dark:text-blue-400 transition-colors"
-                                title="Edit Teacher and Assignments"
+                                title="Edit Personnel"
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
                               </button>
@@ -2231,15 +2708,15 @@ export const OrgSelectionModule: React.FC = () => {
                                 type="button"
                                 onClick={() => handleDeletePerson(p.id)}
                                 className="p-1.5 rounded-lg hover:bg-red-500/10 text-red-500 transition-colors"
-                                title="Remove Teacher"
+                                title="Remove Personnel"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </div>
                           </div>
 
-                          {/* Assignments Badges */}
-                          {selectedType === 'college' && (
+                          {/* Assignments / Details Badges */}
+                          {selectedType === 'college' ? (
                             <div className="pt-2 border-t border-slate-200/50 dark:border-slate-800/80">
                               <div className="text-[10px] font-bold text-slate-500 mb-1.5 flex items-center gap-1">
                                 <BookOpen className="w-3 h-3 text-blue-500" />
@@ -2263,6 +2740,44 @@ export const OrgSelectionModule: React.FC = () => {
                                       ({a.required_periods || 4}p/wk)
                                     </span>
                                   ))}
+                                </div>
+                              )}
+                            </div>
+                          ) : selectedType === 'airline' ? (
+                            <div className="pt-2 border-t border-slate-200/50 dark:border-slate-800/80 space-y-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-bold text-[10px]">
+                                  Flight Duty: {p.preferences?.duty || 'Standard Flight Ops'}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 font-semibold text-[10px]">
+                                  Window: {p.preferences?.start_time || '06:00'}–{p.preferences?.end_time || '14:00'}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-600 dark:text-purple-400 font-semibold text-[10px]">
+                                  Rest: Min {p.preferences?.min_rest_hours || 12}h
+                                </span>
+                              </div>
+                              {p.skills && p.skills.length > 0 && (
+                                <div className="text-[10px] text-slate-500">
+                                  Ratings: {p.skills.map((sk: any) => typeof sk === 'string' ? sk : sk.name).join(', ')}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="pt-2 border-t border-slate-200/50 dark:border-slate-800/80 space-y-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-bold text-[10px]">
+                                  Duty: {p.preferences?.duty || 'Standard Shift'}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 font-semibold text-[10px]">
+                                  Hours: {p.preferences?.start_time || '09:00'}–{p.preferences?.end_time || '17:00'}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-slate-500/10 text-slate-600 dark:text-slate-300 font-semibold text-[10px]">
+                                  Days: {(p.preferences?.working_days || [0, 1, 2, 3, 4]).map((d: number) => ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]).join(', ')}
+                                </span>
+                              </div>
+                              {p.skills && p.skills.length > 0 && (
+                                <div className="text-[10px] text-slate-500">
+                                  Skills: {p.skills.map((sk: any) => typeof sk === 'string' ? sk : sk.name).join(', ')}
                                 </div>
                               )}
                             </div>
@@ -2296,17 +2811,24 @@ export const OrgSelectionModule: React.FC = () => {
             </div>
           )}
 
-
-
           {/* ============================================================== */}
           {/* STEP 4: TIMETABLE CONFIGURATION & BREAKS                       */}
           {/* ============================================================== */}
           {currentStep === 4 && (
             <div className="space-y-6 animate-in fade-in duration-200">
               <div>
-                <h2 className="text-lg font-bold text-slate-900 dark:text-white">Step 4: Timetable Configuration & Shift Rules</h2>
+                <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-blue-600" />
+                  <span>
+                    Step 4: {selectedType === 'college' ? 'Timetable Configuration & Period Durations' : selectedType === 'airline' ? 'Flight Operations Schedule & Rest Regulations' : 'Working Hours, Shifts & Rest Interval Rules'}
+                  </span>
+                </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Configure daily lecture durations, designated lunch/refreshment breaks, and minimum rest periods.
+                  {selectedType === 'college'
+                    ? 'Configure daily lecture durations, designated lunch/refreshment breaks, and teaching period intervals.'
+                    : selectedType === 'airline'
+                    ? 'Configure flight duty periods, rest intervals between flights, and turnaround breaks according to aviation safety regulations.'
+                    : 'Configure daily core working hours (e.g. 9 AM - 5 PM), lunch break intervals, and rest period rules.'}
                 </p>
               </div>
 

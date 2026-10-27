@@ -182,6 +182,13 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
             "person_id": assigned_p.id if assigned_p else None,
             "person_name": assigned_p.name if assigned_p else "Unfilled",
             "person_role": assigned_p.role_title if assigned_p else "",
+            "duty": (s.profession_metadata or {}).get("duty") or (s.profession_metadata or {}).get("flight_duty") or s.title,
+            "location": (s.profession_metadata or {}).get("location") or (res.name if res else "Main Location"),
+            "flight_number": (s.profession_metadata or {}).get("flight_number"),
+            "aircraft": (s.profession_metadata or {}).get("aircraft"),
+            "gate": (s.profession_metadata or {}).get("gate"),
+            "operational_info": (s.profession_metadata or {}).get("operational_info"),
+            "org_type": (s.profession_metadata or {}).get("org_type") or org_type,
             "is_replacement": primary_assign.is_replacement if primary_assign else False,
             "replacement_type": primary_assign.replacement_type if primary_assign else "none",
             "replacement_reason": primary_assign.replacement_reason if primary_assign else None,
@@ -217,6 +224,7 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
     return {
         "schedule": sched,
         "slots": slot_cards,
+        "slot_cards": slot_cards,
         "total_slots": len(slot_cards),
         "work_slots_count": len(work_slots),
         "filled_slots": filled_count,
@@ -746,151 +754,90 @@ def ensure_comprehensive_slots_for_schedule(
     subjects = db.query(Subject).filter(Subject.org_id == org.id).all()
     subj_map = {s.id: s for s in subjects}
 
-    # Build workload items for EVERY active employee & teacher
-    workload_items = []
-    
-    # 1. Staff with dedicated TeacherSubjectAssignment records
-    for ta in teacher_assignments:
-        sub = subj_map.get(ta.subject_id)
-        req_periods = getattr(ta, "required_periods", 4) or 4
-        dept = next((d for d in departments if d.id == (ta.department_id or (sub.department_id if sub else None))), None)
-        dept_prefix = f"{dept.code} - " if dept and dept.code else ""
-        c_name = ta.class_name or f"{dept_prefix}{ta.semester or 'General'}"
-        workload_items.append({
-            "person_id": ta.person_id,
-            "subject_id": ta.subject_id,
-            "subject_name": sub.name if sub else (ta.semester or "Lecture"),
-            "subject_code": sub.code if sub else "",
-            "semester": ta.semester or (sub.semester if sub else "S1"),
-            "class_name": c_name,
-            "department_id": ta.department_id or (sub.department_id if sub else dept_id),
-            "required_periods": req_periods,
-            "allowed_working_days": getattr(ta, "allowed_working_days", [0, 1, 2, 3, 4]) or [0, 1, 2, 3, 4],
-            "period_duration": getattr(ta, "period_duration", "1 hour") or "1 hour",
-            "is_lab": sub.is_lab if sub else False,
-            "allocated": 0
-        })
-
-    # 2. Staff without dedicated TeacherSubjectAssignment records (ensure they also get scheduled!)
-    assigned_person_ids = {w["person_id"] for w in workload_items}
-    for p in people:
-        if p.id not in assigned_person_ids:
-            dept = next((d for d in departments if d.id == p.department_id), None)
-            dept_prefix = f"{dept.code} - " if dept and dept.code else ""
-
-            # Distinguish faculty from general employees
-            role_l = (p.role_title or "").lower()
-            faculty_keywords = ["professor", "lecturer", "faculty", "teacher", "instructor", "dean", "hod", "chair", "tutor", "fellow"]
-            non_teaching_keywords = ["clerk", "accountant", "security", "driver", "librarian", "technician", "attendant", "peon", "support", "maintenance", "warden", "receptionist", "custodian", "officer", "nurse", "operator", "admin"]
-            is_faculty = any(fk in role_l for fk in faculty_keywords) or (isinstance(p.profession_metadata, dict) and p.profession_metadata.get("is_faculty") is True)
-            if not is_faculty and org.type in ["college", "university"] and not any(ntk in role_l for ntk in non_teaching_keywords):
-                is_faculty = True
-
-            if is_faculty and org.type in ["college", "university"]:
-                claimed_sub_ids = {w["subject_id"] for w in workload_items if w.get("subject_id")}
-                dept_subs = [s for s in subjects if s.department_id == p.department_id and s.id not in claimed_sub_ids]
-                sub = dept_subs[0] if dept_subs else None
-                sub_name = sub.name if sub else f"{p.name} Academic Lecture"
-                sub_code = sub.code if sub else "ACAD"
-                sub_sem = sub.semester if sub else ((p.profession_metadata or {}).get("semester", "S1") if isinstance(p.profession_metadata, dict) else "S1")
-                c_name = f"{dept_prefix}{sub_sem}" if sub else f"{dept_prefix}{p.name} Class"
-            else:
-                sub = None
-                sub_name = f"{p.role_title or 'Staff'} Operational Shift"
-                sub_code = "OPS"
-                sub_sem = "General"
-                c_name = f"{dept_prefix}Operations"
-
-            max_hrs = p.max_hours_per_week or 40.0
-            req_periods = max(2, min(5, round(max_hrs / 8.0)))
-
-            workload_items.append({
-                "person_id": p.id,
-                "subject_id": sub.id if sub else None,
-                "subject_name": sub_name,
-                "subject_code": sub_code,
-                "semester": sub_sem,
-                "class_name": c_name,
-                "department_id": p.department_id or dept_id,
-                "required_periods": req_periods,
-                "allowed_working_days": [0, 1, 2, 3, 4],
-                "period_duration": "1 hour",
-                "is_lab": False,
-                "allocated": 0
-            })
-
-    # Group workload items by cohort/class so parallel cohorts run in separate rooms
-    cohort_groups: Dict[str, List[Dict[str, Any]]] = {}
-    for w in workload_items:
-        cohort_groups.setdefault(w["class_name"], []).append(w)
-
-    curr = datetime.datetime.strptime(period_start, "%Y-%m-%d").date()
-    end_d = datetime.datetime.strptime(period_end, "%Y-%m-%d").date()
     slot_objects = []
     slot_order_idx = 0
     room_counter = 0
 
-    while curr <= end_d:
-        day_idx = curr.weekday()
-        day_cfg = working_sched.get(str(day_idx))
-        if day_cfg and day_cfg.get("is_working_day"):
-            periods = day_cfg.get("periods", [])
-            for p in periods:
-                p_type = p.get("type", "lecture")
-                is_break = p_type in ["break", "lunch", "assembly"]
+    curr = datetime.datetime.strptime(period_start, "%Y-%m-%d").date()
+    end_d = datetime.datetime.strptime(period_end, "%Y-%m-%d").date()
 
-                if is_break:
-                    b_slot = RequirementSlot(
-                        org_id=org.id,
-                        schedule_id=sched.id,
-                        subject_id=None,
-                        title=p.get("name", "Break"),
-                        date_str=curr.strftime("%Y-%m-%d"),
-                        day_of_week=day_idx,
-                        start_time=p.get("start_time", "11:00"),
-                        end_time=p.get("end_time", "11:30"),
-                        resource_id=res_id,
-                        department_id=dept_id,
-                        min_staff=0,
-                        target_staff=0,
-                        max_staff=0,
-                        slot_order=slot_order_idx,
-                        period_type="break",
-                        is_locked=False,
-                        profession_metadata={"class": "All", "class_name": "All"},
-                        required_skills=[]
-                    )
-                    db.add(b_slot)
-                    slot_objects.append(b_slot)
-                    slot_order_idx += 1
-                else:
-                    # Allocate a slot for each cohort needing periods on this day
-                    for c_name, c_items in cohort_groups.items():
-                        eligible = [
-                            w for w in c_items
-                            if day_idx in w["allowed_working_days"] and w["allocated"] < w["required_periods"]
-                        ]
-                        if not eligible and sum(w["allocated"] for w in c_items) < sum(w["required_periods"] for w in c_items):
-                            eligible = [w for w in c_items if day_idx in w["allowed_working_days"]]
+    if org.type in ["company", "office"]:
+        # ==============================================================
+        # COMPANY / OFFICE: Multi-person concurrent operational slots
+        # Every employee works their scheduled hours simultaneously
+        # ==============================================================
+        while curr <= end_d:
+            day_idx = curr.weekday()
+            day_cfg = working_sched.get(str(day_idx))
+            if day_cfg and day_cfg.get("is_working_day"):
+                periods = day_cfg.get("periods", [])
+                break_added = set()
 
-                        if eligible:
-                            chosen = min(eligible, key=lambda w: w["allocated"])
-                            chosen["allocated"] += 1
+                for p_cfg in periods:
+                    p_type = p_cfg.get("type", "work")
+                    is_break = p_type in ["break", "lunch", "assembly"]
+                    p_start = p_cfg.get("start_time", "09:00")
+                    p_end = p_cfg.get("end_time", "11:00")
 
+                    if is_break:
+                        if p_start not in break_added:
+                            break_added.add(p_start)
+                            b_slot = RequirementSlot(
+                                org_id=org.id,
+                                schedule_id=sched.id,
+                                subject_id=None,
+                                title=p_cfg.get("name", "Break"),
+                                date_str=curr.strftime("%Y-%m-%d"),
+                                day_of_week=day_idx,
+                                start_time=p_start,
+                                end_time=p_end,
+                                resource_id=res_id,
+                                department_id=dept_id,
+                                min_staff=0,
+                                target_staff=0,
+                                max_staff=0,
+                                slot_order=slot_order_idx,
+                                period_type="break",
+                                is_locked=False,
+                                profession_metadata={"class": "All", "class_name": "All", "org_type": "company"},
+                                required_skills=[]
+                            )
+                            db.add(b_slot)
+                            slot_objects.append(b_slot)
+                            slot_order_idx += 1
+                    else:
+                        # Schedule concurrent slots for every active employee working on this day
+                        for p in people:
+                            prefs = p.preferences or {}
+                            emp_days = prefs.get("working_days") or prefs.get("allowed_working_days") or [0, 1, 2, 3, 4]
+                            if day_idx not in emp_days:
+                                continue
+
+                            emp_start = prefs.get("start_time") or prefs.get("working_hours_start") or "09:00"
+                            emp_end = prefs.get("end_time") or prefs.get("working_hours_end") or "17:00"
+
+                            # Skip if period is strictly outside employee's configured working hours
+                            if p_end <= emp_start or p_start >= emp_end:
+                                continue
+
+                            dept = next((d for d in departments if d.id == p.department_id), None)
                             room = resources[room_counter % len(resources)] if resources else None
                             room_counter += 1
+
+                            duty = prefs.get("duty") or f"{p.role_title or 'Operational'} Shift"
+                            location = prefs.get("location") or (room.name if room else "Main Office / HQ")
 
                             s_obj = RequirementSlot(
                                 org_id=org.id,
                                 schedule_id=sched.id,
-                                subject_id=chosen["subject_id"],
-                                title=f"{chosen['subject_name']} ({c_name})",
+                                subject_id=None,
+                                title=f"{duty} ({p.name})",
                                 date_str=curr.strftime("%Y-%m-%d"),
                                 day_of_week=day_idx,
-                                start_time=p.get("start_time", "09:00"),
-                                end_time=p.get("end_time", "10:00"),
+                                start_time=p_start,
+                                end_time=p_end,
                                 resource_id=room.id if room else res_id,
-                                department_id=chosen["department_id"],
+                                department_id=p.department_id or dept_id,
                                 min_staff=1,
                                 target_staff=1,
                                 max_staff=1,
@@ -898,23 +845,256 @@ def ensure_comprehensive_slots_for_schedule(
                                 period_type="work",
                                 is_locked=False,
                                 profession_metadata={
-                                    "subject": chosen["subject_name"],
-                                    "subject_code": chosen["subject_code"],
-                                    "semester": chosen["semester"],
-                                    "class": c_name,
-                                    "class_name": c_name,
-                                    "subject_id": chosen["subject_id"],
-                                    "target_person_id": chosen["person_id"],
-                                    "period_duration": chosen["period_duration"],
-                                    "lab": chosen["is_lab"]
+                                    "org_type": "company",
+                                    "employee_name": p.name,
+                                    "role": p.role_title or "Staff Member",
+                                    "department": dept.name if dept else "Operations",
+                                    "duty": duty,
+                                    "target_person_id": p.id,
+                                    "location": location,
+                                    "start_time": p_start,
+                                    "end_time": p_end
                                 },
-                                required_skills=[]
+                                required_skills=[
+                                    s.get("name") for s in (p.skills or [])
+                                    if isinstance(s, dict) and s.get("name")
+                                ]
                             )
                             db.add(s_obj)
                             slot_objects.append(s_obj)
                             slot_order_idx += 1
 
-        curr += datetime.timedelta(days=1)
+            curr += datetime.timedelta(days=1)
+
+    elif org.type in ["airline", "aviation"]:
+        # ==============================================================
+        # AVIATION / AIRLINE: Flight operations, crew duties & rotating shifts
+        # ==============================================================
+        while curr <= end_d:
+            day_idx = curr.weekday()
+            day_cfg = working_sched.get(str(day_idx))
+            if day_cfg and day_cfg.get("is_working_day"):
+                periods = day_cfg.get("periods", [])
+                for p in people:
+                    prefs = p.preferences or {}
+                    crew_days = prefs.get("working_days") or [0, 1, 2, 3, 4]
+                    if day_idx not in crew_days:
+                        continue
+
+                    # Pick shift for crew member
+                    work_periods = [pr for pr in periods if pr.get("type", "work") == "work"]
+                    if not work_periods:
+                        work_periods = [{"name": "Standard Flight Ops", "start_time": "08:00", "end_time": "16:00"}]
+
+                    # Distribute shift across people, respecting individual configured hours if set
+                    assigned_shift = work_periods[p.id % len(work_periods)]
+                    p_start = prefs.get("start_time") or assigned_shift.get("start_time", "07:00")
+                    p_end = prefs.get("end_time") or assigned_shift.get("end_time", "15:00")
+
+                    dept = next((d for d in departments if d.id == p.department_id), None)
+                    flight_num = prefs.get("flight_number") or f"FL-{100 + (p.id * 19) % 900}"
+                    aircraft = prefs.get("aircraft") or "Boeing 737-800"
+                    gate = f"Gate {chr(65 + (p.id % 6))}{1 + (p.id % 12)}"
+                    flight_duty = prefs.get("flight_duty") or prefs.get("duty") or "Flight Duty & Crew Operations"
+
+                    s_obj = RequirementSlot(
+                        org_id=org.id,
+                        schedule_id=sched.id,
+                        subject_id=None,
+                        title=f"{flight_duty} ({p.name})",
+                        date_str=curr.strftime("%Y-%m-%d"),
+                        day_of_week=day_idx,
+                        start_time=p_start,
+                        end_time=p_end,
+                        resource_id=res_id,
+                        department_id=p.department_id or dept_id,
+                        min_staff=1,
+                        target_staff=1,
+                        max_staff=1,
+                        slot_order=slot_order_idx,
+                        period_type="work",
+                        is_locked=False,
+                        profession_metadata={
+                            "org_type": "airline",
+                            "crew_member": p.name,
+                            "role": p.role_title or "Flight Crew",
+                            "duty": flight_duty,
+                            "flight_number": flight_num,
+                            "aircraft": aircraft,
+                            "gate": gate,
+                            "target_person_id": p.id,
+                            "operational_info": f"{aircraft} • {gate} • {flight_num}",
+                            "start_time": p_start,
+                            "end_time": p_end
+                        },
+                        required_skills=[
+                            s.get("name") for s in (p.skills or [])
+                            if isinstance(s, dict) and s.get("name")
+                        ]
+                    )
+                    db.add(s_obj)
+                    slot_objects.append(s_obj)
+                    slot_order_idx += 1
+
+            curr += datetime.timedelta(days=1)
+
+    else:
+        # ==============================================================
+        # UNIVERSITY / COLLEGE: Faculty, Semesters (S1-S8), Subjects, Labs
+        # ==============================================================
+        workload_items = []
+
+        # 1. Staff with dedicated TeacherSubjectAssignment records
+        for ta in teacher_assignments:
+            sub = subj_map.get(ta.subject_id)
+            req_periods = getattr(ta, "required_periods", 4) or 4
+            dept = next((d for d in departments if d.id == (ta.department_id or (sub.department_id if sub else None))), None)
+            dept_prefix = f"{dept.code} - " if dept and dept.code else ""
+            c_name = ta.class_name or f"{dept_prefix}{ta.semester or 'General'}"
+            workload_items.append({
+                "person_id": ta.person_id,
+                "subject_id": ta.subject_id,
+                "subject_name": sub.name if sub else (ta.semester or "Lecture"),
+                "subject_code": sub.code if sub else "",
+                "semester": ta.semester or (sub.semester if sub else "S1"),
+                "class_name": c_name,
+                "department_id": ta.department_id or (sub.department_id if sub else dept_id),
+                "required_periods": req_periods,
+                "allowed_working_days": getattr(ta, "allowed_working_days", [0, 1, 2, 3, 4]) or [0, 1, 2, 3, 4],
+                "period_duration": getattr(ta, "period_duration", "1 hour") or "1 hour",
+                "is_lab": sub.is_lab if sub else False,
+                "allocated": 0
+            })
+
+        # 2. Staff without dedicated TeacherSubjectAssignment records (ensure ALL faculty get scheduled)
+        assigned_person_ids = {w["person_id"] for w in workload_items}
+        for p in people:
+            if p.id not in assigned_person_ids:
+                dept = next((d for d in departments if d.id == p.department_id), None)
+                dept_prefix = f"{dept.code} - " if dept and dept.code else ""
+
+                role_l = (p.role_title or "").lower()
+                non_teaching_keywords = ["clerk", "accountant", "security", "driver", "librarian", "technician", "attendant", "peon", "support", "maintenance", "warden", "receptionist", "custodian", "officer", "nurse", "operator", "admin"]
+                is_faculty = not any(ntk in role_l for ntk in non_teaching_keywords)
+
+                claimed_sub_ids = {w["subject_id"] for w in workload_items if w.get("subject_id")}
+                dept_subs = [s for s in subjects if s.department_id == p.department_id and s.id not in claimed_sub_ids]
+                sub = dept_subs[0] if dept_subs else (subjects[0] if subjects else None)
+
+                sub_name = sub.name if sub else f"{p.name} Academic Lecture"
+                sub_code = sub.code if sub else "ACAD"
+                sub_sem = sub.semester if sub else ((p.profession_metadata or {}).get("semester", "S1") if isinstance(p.profession_metadata, dict) else "S1")
+                c_name = f"{dept_prefix}{sub_sem}" if sub else f"{dept_prefix}{p.name} Section"
+
+                max_hrs = p.max_hours_per_week or 40.0
+                req_periods = max(2, min(5, round(max_hrs / 8.0)))
+
+                workload_items.append({
+                    "person_id": p.id,
+                    "subject_id": sub.id if sub else None,
+                    "subject_name": sub_name,
+                    "subject_code": sub_code,
+                    "semester": sub_sem,
+                    "class_name": c_name,
+                    "department_id": p.department_id or dept_id,
+                    "required_periods": req_periods,
+                    "allowed_working_days": [0, 1, 2, 3, 4],
+                    "period_duration": "1 hour",
+                    "is_lab": False,
+                    "allocated": 0
+                })
+
+        # Group workload items by cohort/class so parallel cohorts run in separate rooms
+        cohort_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for w in workload_items:
+            cohort_groups.setdefault(w["class_name"], []).append(w)
+
+        while curr <= end_d:
+            day_idx = curr.weekday()
+            day_cfg = working_sched.get(str(day_idx))
+            if day_cfg and day_cfg.get("is_working_day"):
+                periods = day_cfg.get("periods", [])
+                for p in periods:
+                    p_type = p.get("type", "lecture")
+                    is_break = p_type in ["break", "lunch", "assembly"]
+
+                    if is_break:
+                        b_slot = RequirementSlot(
+                            org_id=org.id,
+                            schedule_id=sched.id,
+                            subject_id=None,
+                            title=p.get("name", "Break"),
+                            date_str=curr.strftime("%Y-%m-%d"),
+                            day_of_week=day_idx,
+                            start_time=p.get("start_time", "11:00"),
+                            end_time=p.get("end_time", "11:30"),
+                            resource_id=res_id,
+                            department_id=dept_id,
+                            min_staff=0,
+                            target_staff=0,
+                            max_staff=0,
+                            slot_order=slot_order_idx,
+                            period_type="break",
+                            is_locked=False,
+                            profession_metadata={"class": "All", "class_name": "All", "org_type": "college"},
+                            required_skills=[]
+                        )
+                        db.add(b_slot)
+                        slot_objects.append(b_slot)
+                        slot_order_idx += 1
+                    else:
+                        # Allocate a slot for each cohort needing periods on this day
+                        for c_name, c_items in cohort_groups.items():
+                            eligible = [
+                                w for w in c_items
+                                if day_idx in w["allowed_working_days"] and w["allocated"] < w["required_periods"]
+                            ]
+                            if not eligible and sum(w["allocated"] for w in c_items) < sum(w["required_periods"] for w in c_items):
+                                eligible = [w for w in c_items if day_idx in w["allowed_working_days"]]
+
+                            if eligible:
+                                chosen = min(eligible, key=lambda w: w["allocated"])
+                                chosen["allocated"] += 1
+
+                                room = resources[room_counter % len(resources)] if resources else None
+                                room_counter += 1
+
+                                s_obj = RequirementSlot(
+                                    org_id=org.id,
+                                    schedule_id=sched.id,
+                                    subject_id=chosen["subject_id"],
+                                    title=f"{chosen['subject_name']} ({c_name})",
+                                    date_str=curr.strftime("%Y-%m-%d"),
+                                    day_of_week=day_idx,
+                                    start_time=p.get("start_time", "09:00"),
+                                    end_time=p.get("end_time", "10:00"),
+                                    resource_id=room.id if room else res_id,
+                                    department_id=chosen["department_id"],
+                                    min_staff=1,
+                                    target_staff=1,
+                                    max_staff=1,
+                                    slot_order=slot_order_idx,
+                                    period_type="work",
+                                    is_locked=False,
+                                    profession_metadata={
+                                        "org_type": "college",
+                                        "subject": chosen["subject_name"],
+                                        "subject_code": chosen["subject_code"],
+                                        "semester": chosen["semester"],
+                                        "class": c_name,
+                                        "class_name": c_name,
+                                        "subject_id": chosen["subject_id"],
+                                        "target_person_id": chosen["person_id"],
+                                        "period_duration": chosen["period_duration"],
+                                        "lab": chosen["is_lab"]
+                                    },
+                                    required_skills=[]
+                                )
+                                db.add(s_obj)
+                                slot_objects.append(s_obj)
+                                slot_order_idx += 1
+
+            curr += datetime.timedelta(days=1)
 
     db.commit()
     return db.query(RequirementSlot).filter(RequirementSlot.schedule_id == sched.id).all()
@@ -1563,10 +1743,14 @@ def glixon_generate_schedule(req: GlixonGenerateRequest, db: Session = Depends(g
         dur_m = calculate_shift_duration_minutes(slot.start_time, slot.end_time)
         dur_h = calculate_shift_duration_hours(slot.start_time, slot.end_time)
 
+        meta = slot.profession_metadata or {}
+        duty_title = meta.get("duty") or meta.get("flight_duty") or sub_name
+
         enriched_assignments.append({
             "slot_id": slot.id,
             "teacher_id": teacher.id,
             "teacher_name": teacher.name,
+            "role": teacher.role_title or "Staff Member",
             "department_id": dept.id if dept else None,
             "department_name": dept.name if dept else "General",
             "semester": sem_code or "S1",
@@ -1574,6 +1758,13 @@ def glixon_generate_schedule(req: GlixonGenerateRequest, db: Session = Depends(g
             "subject_name": sub_name,
             "subject_code": sub_code,
             "class_name": c_name or "General",
+            "duty": duty_title,
+            "location": meta.get("location") or (room.name if room else "HQ"),
+            "flight_number": meta.get("flight_number"),
+            "aircraft": meta.get("aircraft"),
+            "gate": meta.get("gate"),
+            "operational_info": meta.get("operational_info"),
+            "org_type": meta.get("org_type") or org.type,
             "day_of_week": slot.day_of_week,
             "day_name": day_names[slot.day_of_week] if 0 <= slot.day_of_week < 7 else "Day",
             "date_str": slot.date_str or a.get("date_str"),
@@ -1667,6 +1858,7 @@ def glixon_generate_schedule(req: GlixonGenerateRequest, db: Session = Depends(g
         "fairness_score": solution.get("fairness_score", 95.0),
         "total_assignments": len(enriched_assignments),
         "assignments": enriched_assignments,
+        "preview_assignments": enriched_assignments,
         "teacher_timetables": teacher_timetables,
         "class_timetables": class_timetables,
         "semester_timetables": semester_timetables,

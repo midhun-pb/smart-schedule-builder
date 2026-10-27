@@ -29,6 +29,7 @@ import {
   Check,
   Shield,
   GraduationCap,
+  Plane,
 } from 'lucide-react';
 
 interface FormAssignmentRow {
@@ -84,6 +85,13 @@ export const ProfilesModule: React.FC = () => {
   const [formTheoryLab, setFormTheoryLab] = useState('both');
   const [formAssignments, setFormAssignments] = useState<FormAssignmentRow[]>([]);
 
+  // Company and Airline specific form state
+  const [formDuty, setFormDuty] = useState('');
+  const [formStartTime, setFormStartTime] = useState('09:00');
+  const [formEndTime, setFormEndTime] = useState('17:00');
+  const [formWorkDays, setFormWorkDays] = useState<number[]>([0, 1, 2, 3, 4]);
+  const [formRestHours, setFormRestHours] = useState(12);
+
   // Edit teacher modal state
   const [isEditingInModal, setIsEditingInModal] = useState(false);
   const [editName, setEditName] = useState('');
@@ -102,6 +110,13 @@ export const ProfilesModule: React.FC = () => {
   const [newQualText, setNewQualText] = useState('');
   const [editAssignments, setEditAssignments] = useState<FormAssignmentRow[]>([]);
   const [isSavingTeacher, setIsSavingTeacher] = useState(false);
+
+  // Company and Airline specific edit state
+  const [editDuty, setEditDuty] = useState('');
+  const [editStartTime, setEditStartTime] = useState('09:00');
+  const [editEndTime, setEditEndTime] = useState('17:00');
+  const [editWorkDays, setEditWorkDays] = useState<number[]>([0, 1, 2, 3, 4]);
+  const [editRestHours, setEditRestHours] = useState(12);
 
   // Excel/CSV import state
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -211,6 +226,14 @@ export const ProfilesModule: React.FC = () => {
       setEditQualsStr((selectedPerson.qualifications || []).join(', '));
       setEditQualsList(selectedPerson.qualifications || []);
       setEditSkills(selectedPerson.skills || []);
+
+      const prefs = selectedPerson.preferences || {};
+      setEditDuty(prefs.duty || '');
+      setEditStartTime(prefs.start_time || (activeOrg?.type === 'airline' ? '06:00' : '09:00'));
+      setEditEndTime(prefs.end_time || (activeOrg?.type === 'airline' ? '14:00' : '17:00'));
+      setEditWorkDays(prefs.working_days || [0, 1, 2, 3, 4]);
+      setEditRestHours(prefs.min_rest_hours || 12);
+
       setIsEditingInModal(false);
       loadPersonAssignments(selectedPerson.id);
     }
@@ -487,29 +510,39 @@ export const ProfilesModule: React.FC = () => {
           };
         });
 
+      const personPrefs = {
+        duty: formDuty || (activeOrg.type === 'airline' ? 'Flight Duty' : activeOrg.type === 'company' ? 'Standard Shift' : undefined),
+        start_time: formStartTime,
+        end_time: formEndTime,
+        working_days: formWorkDays,
+        min_rest_hours: formRestHours,
+        skills: formSkillsStr ? formSkillsStr.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      };
+
       await api.createPerson({
         org_id: activeOrg.id,
         name: formName,
-        email: formEmail || `${formName.toLowerCase().replace(/[^a-z0-9]/g, '.')}@institution.edu`,
+        email: formEmail || `${formName.toLowerCase().replace(/[^a-z0-9]/g, '.')}@${activeOrg.type === 'airline' ? 'airline.aero' : activeOrg.type === 'company' ? 'company.com' : 'institution.edu'}`,
         phone: formPhone || undefined,
-        role_title: formRole || (activeOrg.type === 'college' ? 'Teacher / Professor' : 'Staff'),
-        employee_code: formCode || `FAC-${Date.now().toString().slice(-4)}`,
+        role_title: formRole || (activeOrg.type === 'college' ? 'Teacher / Professor' : activeOrg.type === 'airline' ? 'Flight Crew' : 'Staff Member'),
+        employee_code: formCode || `${activeOrg.type === 'airline' ? 'CREW' : activeOrg.type === 'company' ? 'EMP' : 'FAC'}-${Date.now().toString().slice(-4)}`,
         profession_type: activeOrg.type,
         department_id: formDeptId,
         qualifications: qualsArray,
         skills: skillsArray,
         max_hours_per_week: formHoursLimit || 40,
+        preferences: personPrefs,
         profession_metadata: {
           semesters: Array.from(new Set(updatedRows.map((a) => a.semester).filter(Boolean))),
           theory_lab: formTheoryLab,
         },
         status: 'active',
-        teacher_assignments: assignmentsPayload,
+        teacher_assignments: activeOrg.type === 'college' ? assignmentsPayload : [],
       });
 
       addToast(
-        'Teacher Saved Successfully',
-        `Saved ${formName} with ${assignmentsPayload.length} semester assignment(s).`,
+        `${activeOrg.type === 'college' ? 'Teacher' : activeOrg.type === 'airline' ? 'Crew Member' : 'Employee'} Saved Successfully`,
+        `Saved ${formName}${activeOrg.type === 'college' ? ` with ${assignmentsPayload.length} semester assignment(s)` : ''}.`,
         'success'
       );
 
@@ -603,6 +636,15 @@ export const ProfilesModule: React.FC = () => {
         ? editQualsList
         : (editQualsStr ? editQualsStr.split(',').map((q) => q.trim()).filter(Boolean) : []);
 
+      const editPrefs = {
+        ...(selectedPerson.preferences || {}),
+        duty: editDuty || undefined,
+        start_time: editStartTime,
+        end_time: editEndTime,
+        working_days: editWorkDays,
+        min_rest_hours: editRestHours,
+      };
+
       await api.updatePerson(selectedPerson.id, {
         name: editName,
         email: editEmail,
@@ -613,17 +655,18 @@ export const ProfilesModule: React.FC = () => {
         qualifications: finalQuals,
         skills: editSkills,
         max_hours_per_week: editHoursLimit,
+        preferences: editPrefs,
         status: selectedPerson.status || 'active',
         profession_metadata: {
           ...(selectedPerson.profession_metadata || {}),
           semesters: Array.from(new Set(updatedRows.map((a) => a.semester).filter(Boolean))),
         },
-        teacher_assignments: assignmentsPayload,
+        teacher_assignments: activeOrg.type === 'college' ? assignmentsPayload : [],
       });
 
       addToast(
-        'Teacher Updated',
-        `Updated ${editName} with ${assignmentsPayload.length} semester assignment(s).`,
+        `${activeOrg.type === 'college' ? 'Teacher' : activeOrg.type === 'airline' ? 'Crew Member' : 'Employee'} Updated`,
+        `Updated details for ${editName}.`,
         'success'
       );
       setIsEditingInModal(false);
@@ -1014,8 +1057,9 @@ export const ProfilesModule: React.FC = () => {
           </div>
 
           {/* Section 2: SUBJECTS AND SEMESTERS ASSIGNED TO THIS TEACHER */}
-          <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-6 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-blue-500/5 p-4 rounded-2xl border border-blue-500/20">
+          {activeOrg?.type === 'college' && (
+            <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-6 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-blue-500/5 p-4 rounded-2xl border border-blue-500/20">
               <div>
                 <h4 className="text-sm font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
                   <BookOpen className="w-4 h-4 text-blue-600" />
@@ -1302,7 +1346,240 @@ export const ProfilesModule: React.FC = () => {
                 })}
               </div>
             )}
-          </div>
+            </div>
+          )}
+
+          {/* Section 2: COMPANY EMPLOYEE SHIFT & DUTY DETAILS */}
+          {activeOrg?.type === 'company' && (
+            <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-6 space-y-4">
+              <div className="bg-blue-500/5 p-4 rounded-2xl border border-blue-500/20">
+                <h4 className="text-sm font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                  <Briefcase className="w-4 h-4 text-blue-600" />
+                  <span>COMPANY SHIFT, DUTY & WORKING HOURS CONFIGURATION</span>
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Configure employee working hours, primary duty assignment, and weekly active days.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Primary Duty / Shift Title *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Core Product Engineering / Operations"
+                    value={formDuty}
+                    onChange={(e) => setFormDuty(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Daily Shift Start Time
+                  </label>
+                  <input
+                    type="time"
+                    value={formStartTime}
+                    onChange={(e) => setFormStartTime(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Daily Shift End Time
+                  </label>
+                  <input
+                    type="time"
+                    value={formEndTime}
+                    onChange={(e) => setFormEndTime(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Professional Skills (comma-separated)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Python, SQL, Incident Response, Customer Support"
+                    value={formSkillsStr}
+                    onChange={(e) => setFormSkillsStr(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Minimum Rest Period Between Shifts (Hours)
+                  </label>
+                  <input
+                    type="number"
+                    min="8"
+                    max="24"
+                    value={formRestHours}
+                    onChange={(e) => setFormRestHours(Number(e.target.value))}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                  Assigned Working Days:
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {DAY_LABELS.map(({ label, day }) => {
+                    const isSelected = formWorkDays.includes(day);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        onClick={() => {
+                          const updated = isSelected
+                            ? formWorkDays.filter((d) => d !== day)
+                            : [...formWorkDays, day].sort();
+                          setFormWorkDays(updated);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                          isSelected
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                            : 'bg-white/40 dark:bg-slate-800/40 text-slate-500 border-slate-200/50 dark:border-slate-700/50 hover:bg-slate-100'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  GLIXON schedules this employee strictly during their configured working days and working hours ({formStartTime}–{formEndTime}).
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Section 2: AVIATION CREW FLIGHT DUTY & SAFETY CONFIGURATION */}
+          {activeOrg?.type === 'airline' && (
+            <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-6 space-y-4">
+              <div className="bg-blue-500/5 p-4 rounded-2xl border border-blue-500/20">
+                <h4 className="text-sm font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                  <Plane className="w-4 h-4 text-blue-600" />
+                  <span>AVIATION CREW DUTIES & SAFETY REST REGULATIONS</span>
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Configure flight crew member duties, verified ratings, operational timing windows, and FAA/ICAO mandatory rest periods.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Flight Duty Assignment *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Domestic Flight Ops / B737 Routes"
+                    value={formDuty}
+                    onChange={(e) => setFormDuty(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Flight Duty Window Start
+                  </label>
+                  <input
+                    type="time"
+                    value={formStartTime}
+                    onChange={(e) => setFormStartTime(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Flight Duty Window End
+                  </label>
+                  <input
+                    type="time"
+                    value={formEndTime}
+                    onChange={(e) => setFormEndTime(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Verified Ratings & Type Certificates (comma-separated)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. ATP, B737-800 Type Rating, FAA First Class Medical"
+                    value={formSkillsStr}
+                    onChange={(e) => setFormSkillsStr(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Mandatory Rest Interval (Hours)
+                  </label>
+                  <input
+                    type="number"
+                    min="10"
+                    max="24"
+                    value={formRestHours}
+                    onChange={(e) => setFormRestHours(Number(e.target.value))}
+                    className="w-full px-3.5 py-2.5 rounded-xl glass-input text-xs font-medium"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                  Operating Flight Days:
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {DAY_LABELS.map(({ label, day }) => {
+                    const isSelected = formWorkDays.includes(day);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        onClick={() => {
+                          const updated = isSelected
+                            ? formWorkDays.filter((d) => d !== day)
+                            : [...formWorkDays, day].sort();
+                          setFormWorkDays(updated);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                          isSelected
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                            : 'bg-white/40 dark:bg-slate-800/40 text-slate-500 border-slate-200/50 dark:border-slate-700/50 hover:bg-slate-100'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  GLIXON strictly enforces FAA/ICAO mandatory minimum {formRestHours}-hour rest periods between flights.
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Form Actions */}
           <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-200/50 dark:border-slate-800/80">
@@ -1318,7 +1595,13 @@ export const ProfilesModule: React.FC = () => {
               disabled={isLoading}
               className="px-7 py-2.5 rounded-xl glass-button-primary text-xs font-bold shadow-md hover:shadow-lg transition-all"
             >
-              {isLoading ? 'Saving Teacher...' : 'Save Teacher'}
+              {isLoading
+                ? 'Saving...'
+                : activeOrg?.type === 'college'
+                ? 'Save Teacher'
+                : activeOrg?.type === 'airline'
+                ? 'Save Crew Member'
+                : 'Save Employee'}
             </button>
           </div>
         </form>
@@ -1801,8 +2084,9 @@ export const ProfilesModule: React.FC = () => {
                 </div>
 
                 {/* Section: SUBJECTS AND SEMESTERS ASSIGNED TO THIS TEACHER */}
-                <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-4 space-y-4">
-                  <div className="flex items-center justify-between">
+                {activeOrg?.type === 'college' && (
+                  <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-4 space-y-4">
+                    <div className="flex items-center justify-between">
                     <div>
                       <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
                         <BookOpen className="w-4 h-4 text-blue-600" />
@@ -2032,6 +2316,191 @@ export const ProfilesModule: React.FC = () => {
                     </div>
                   )}
                 </div>
+              )}
+
+                {/* Section: COMPANY EMPLOYEE SHIFT & DUTY DETAILS */}
+                {activeOrg?.type === 'company' && (
+                  <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-4 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                          <Briefcase className="w-4 h-4 text-blue-600" />
+                          <span>COMPANY SHIFT & WORKING HOURS</span>
+                        </h4>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          Update daily working hours, primary duty assignment, and active days for {selectedPerson.name}.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">Primary Duty / Shift Title</label>
+                        <input
+                          type="text"
+                          value={editDuty}
+                          onChange={(e) => setEditDuty(e.target.value)}
+                          placeholder="e.g. Operations / Customer Support"
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">Daily Shift Start Time</label>
+                        <input
+                          type="time"
+                          value={editStartTime}
+                          onChange={(e) => setEditStartTime(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">Daily Shift End Time</label>
+                        <input
+                          type="time"
+                          value={editEndTime}
+                          onChange={(e) => setEditEndTime(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">Min Rest Between Shifts (Hours)</label>
+                        <input
+                          type="number"
+                          min="8"
+                          max="24"
+                          value={editRestHours}
+                          onChange={(e) => setEditRestHours(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1.5">Assigned Working Days:</label>
+                        <div className="flex flex-wrap gap-2">
+                          {DAY_LABELS.map(({ label, day }) => {
+                            const isSel = editWorkDays.includes(day);
+                            return (
+                              <button
+                                key={day}
+                                type="button"
+                                onClick={() => {
+                                  const updated = isSel
+                                    ? editWorkDays.filter((d) => d !== day)
+                                    : [...editWorkDays, day].sort();
+                                  setEditWorkDays(updated);
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors ${
+                                  isSel
+                                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                    : 'bg-white/40 dark:bg-slate-800/40 text-slate-500 border-slate-200/50 dark:border-slate-700/50 hover:bg-slate-100'
+                                }`}
+                              >
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Section: AVIATION CREW FLIGHT DUTY & SAFETY REGULATIONS */}
+                {activeOrg?.type === 'airline' && (
+                  <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-4 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                          <Plane className="w-4 h-4 text-blue-600" />
+                          <span>FLIGHT DUTY & SAFETY REST REGULATIONS</span>
+                        </h4>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          Update flight duty assignment, operating window, and mandatory rest periods for {selectedPerson.name}.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">Flight Duty Assignment</label>
+                        <input
+                          type="text"
+                          value={editDuty}
+                          onChange={(e) => setEditDuty(e.target.value)}
+                          placeholder="e.g. Domestic Flight Ops / B737 Routes"
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">Flight Duty Window Start</label>
+                        <input
+                          type="time"
+                          value={editStartTime}
+                          onChange={(e) => setEditStartTime(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">Flight Duty Window End</label>
+                        <input
+                          type="time"
+                          value={editEndTime}
+                          onChange={(e) => setEditEndTime(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">Mandatory Rest Interval (Hours)</label>
+                        <input
+                          type="number"
+                          min="10"
+                          max="24"
+                          value={editRestHours}
+                          onChange={(e) => setEditRestHours(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-medium"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1.5">Operating Flight Days:</label>
+                        <div className="flex flex-wrap gap-2">
+                          {DAY_LABELS.map(({ label, day }) => {
+                            const isSel = editWorkDays.includes(day);
+                            return (
+                              <button
+                                key={day}
+                                type="button"
+                                onClick={() => {
+                                  const updated = isSel
+                                    ? editWorkDays.filter((d) => d !== day)
+                                    : [...editWorkDays, day].sort();
+                                  setEditWorkDays(updated);
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors ${
+                                  isSel
+                                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                    : 'bg-white/40 dark:bg-slate-800/40 text-slate-500 border-slate-200/50 dark:border-slate-700/50 hover:bg-slate-100'
+                                }`}
+                              >
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-200/50">
                   <button
@@ -2046,7 +2515,13 @@ export const ProfilesModule: React.FC = () => {
                     disabled={isSavingTeacher}
                     className="px-6 py-2 rounded-xl glass-button-primary text-xs font-bold shadow-md"
                   >
-                    {isSavingTeacher ? 'Saving...' : 'Save Teacher Changes'}
+                    {isSavingTeacher
+                      ? 'Saving...'
+                      : activeOrg?.type === 'college'
+                      ? 'Save Teacher Changes'
+                      : activeOrg?.type === 'airline'
+                      ? 'Save Crew Changes'
+                      : 'Save Employee Changes'}
                   </button>
                 </div>
               </form>
@@ -2066,15 +2541,23 @@ export const ProfilesModule: React.FC = () => {
                     <span className="font-bold text-emerald-500">{selectedPerson.data_quality_score}% Verified</span>
                   </div>
                   <div className="p-3 rounded-2xl glass-pill">
-                    <span className="text-[10px] text-slate-400 font-semibold uppercase block">Active Semesters</span>
+                    <span className="text-[10px] text-slate-400 font-semibold uppercase block">
+                      {activeOrg?.type === 'college' ? 'Active Semesters' : activeOrg?.type === 'airline' ? 'Assigned Duty' : 'Primary Duty'}
+                    </span>
                     <span className="font-bold text-blue-500">
-                      {Array.from(new Set(personAssignments.map((a) => a.semester).filter(Boolean))).length} Semesters
+                      {activeOrg?.type === 'college'
+                        ? `${Array.from(new Set(personAssignments.map((a) => a.semester).filter(Boolean))).length} Semesters`
+                        : selectedPerson.preferences?.duty || 'Standard Duty'}
                     </span>
                   </div>
                   <div className="p-3 rounded-2xl glass-pill">
-                    <span className="text-[10px] text-slate-400 font-semibold uppercase block">Teaching Load</span>
+                    <span className="text-[10px] text-slate-400 font-semibold uppercase block">
+                      {activeOrg?.type === 'college' ? 'Teaching Load' : activeOrg?.type === 'airline' ? 'Duty Window' : 'Work Shift'}
+                    </span>
                     <span className="font-bold text-purple-500">
-                      {personAssignments.reduce((acc, a) => acc + (a.required_periods || 4), 0)} Periods/wk
+                      {activeOrg?.type === 'college'
+                        ? `${personAssignments.reduce((acc, a) => acc + (a.required_periods || 4), 0)} Periods/wk`
+                        : `${selectedPerson.preferences?.start_time || (activeOrg?.type === 'airline' ? '06:00' : '09:00')}–${selectedPerson.preferences?.end_time || (activeOrg?.type === 'airline' ? '14:00' : '17:00')}`}
                     </span>
                   </div>
                 </div>
@@ -2164,11 +2647,12 @@ export const ProfilesModule: React.FC = () => {
                   )}
                 </div>
 
-                {/* Collapsible Semester Sections */}
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between border-b border-slate-200/40 dark:border-slate-800/80 pb-2">
-                    <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
-                      <GraduationCap className="w-4 h-4 text-blue-500" />
+                {/* Collapsible Semester Sections (Only for College) */}
+                {activeOrg?.type === 'college' && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-200/40 dark:border-slate-800/80 pb-2">
+                      <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                        <GraduationCap className="w-4 h-4 text-blue-500" />
                       <span>Configured Semester Assignments</span>
                     </h4>
                     <button
@@ -2304,7 +2788,127 @@ export const ProfilesModule: React.FC = () => {
                         </div>
                       );
                     })}
-                </div>
+                  </div>
+                )}
+
+                {/* Company Shift & Working Hours Overview */}
+                {activeOrg?.type === 'company' && (
+                  <div className="p-4 rounded-2xl glass-panel border border-white/40 dark:border-white/10 space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-200/40 dark:border-slate-800/80 pb-2">
+                      <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                        <Briefcase className="w-4 h-4 text-blue-500" />
+                        <span>Company Work Shift & Duty Assignments</span>
+                      </h4>
+                      <button
+                        onClick={() => setIsEditingInModal(true)}
+                        className="text-xs font-bold text-blue-500 hover:underline flex items-center gap-1"
+                      >
+                        <Edit2 className="w-3 h-3" />
+                        <span>Edit Shift & Duties</span>
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                      <div className="p-3 rounded-xl bg-white/40 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-700/50 space-y-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">Primary Operational Duty</span>
+                        <div className="font-extrabold text-slate-900 dark:text-white">
+                          {selectedPerson.preferences?.duty || selectedPerson.role_title || 'General Operations'}
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-white/40 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-700/50 space-y-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">Configured Working Hours</span>
+                        <div className="font-extrabold text-blue-600 dark:text-blue-400">
+                          {selectedPerson.preferences?.start_time || '09:00'} – {selectedPerson.preferences?.end_time || '17:00'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5 pt-1">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase block">Configured Working Days</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {DAY_LABELS.map(({ label, day }) => {
+                          const isAssigned = (selectedPerson.preferences?.working_days || [0, 1, 2, 3, 4]).includes(day);
+                          return (
+                            <span
+                              key={day}
+                              className={`px-2.5 py-1 rounded-lg text-xs font-bold border ${
+                                isAssigned
+                                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                  : 'bg-white/40 dark:bg-slate-800/40 text-slate-400 border-slate-200/40 dark:border-slate-700/40'
+                              }`}
+                            >
+                              {label}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Airline Flight Duties & Safety Regulations Overview */}
+                {activeOrg?.type === 'airline' && (
+                  <div className="p-4 rounded-2xl glass-panel border border-white/40 dark:border-white/10 space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-200/40 dark:border-slate-800/80 pb-2">
+                      <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                        <Plane className="w-4 h-4 text-blue-500" />
+                        <span>Aviation Crew Flight Operations & Safety</span>
+                      </h4>
+                      <button
+                        onClick={() => setIsEditingInModal(true)}
+                        className="text-xs font-bold text-blue-500 hover:underline flex items-center gap-1"
+                      >
+                        <Edit2 className="w-3 h-3" />
+                        <span>Edit Flight Duty</span>
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                      <div className="p-3 rounded-xl bg-white/40 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-700/50 space-y-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">Assigned Flight Duty</span>
+                        <div className="font-extrabold text-slate-900 dark:text-white">
+                          {selectedPerson.preferences?.duty || 'Standard Flight Ops'}
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-white/40 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-700/50 space-y-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">Duty Window</span>
+                        <div className="font-extrabold text-blue-600 dark:text-blue-400">
+                          {selectedPerson.preferences?.start_time || '06:00'} – {selectedPerson.preferences?.end_time || '14:00'}
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-white/40 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-700/50 space-y-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">Rest Regulations</span>
+                        <div className="font-extrabold text-purple-600 dark:text-purple-400">
+                          Min {selectedPerson.preferences?.min_rest_hours || 12}h Rest
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5 pt-1">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase block">Operating Flight Days</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {DAY_LABELS.map(({ label, day }) => {
+                          const isAssigned = (selectedPerson.preferences?.working_days || [0, 1, 2, 3, 4]).includes(day);
+                          return (
+                            <span
+                              key={day}
+                              className={`px-2.5 py-1 rounded-lg text-xs font-bold border ${
+                                isAssigned
+                                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                  : 'bg-white/40 dark:bg-slate-800/40 text-slate-400 border-slate-200/40 dark:border-slate-700/40'
+                              }`}
+                            >
+                              {label}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Footer Qualifications */}
                 <div className="pt-4 border-t border-slate-200/40 dark:border-slate-800/80 text-xs space-y-1">
