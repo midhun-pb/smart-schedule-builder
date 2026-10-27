@@ -11,6 +11,7 @@ router = APIRouter(prefix="/data-import", tags=["data-import"])
 class CommitImportRequest(BaseModel):
     org_id: int
     records: List[Dict[str, Any]]
+    mode: str = "continue_valid"  # continue_valid or strict
 
 @router.post("/preview")
 async def preview_file(
@@ -39,11 +40,13 @@ async def preview_file(
 def commit_imported_data(payload: CommitImportRequest, db: Session = Depends(get_db)):
     """
     Commits verified spreadsheet rows to the database.
+    Supports transactional safety and modes (continue_valid or strict).
     """
     res = ImportEngine.commit_import(
         org_id=payload.org_id,
         records=payload.records,
-        db=db
+        db=db,
+        mode=payload.mode
     )
     return res
 

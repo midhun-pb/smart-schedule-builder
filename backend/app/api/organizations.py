@@ -304,25 +304,39 @@ def list_organization_semesters(org_id: int, db: Session = Depends(get_db)):
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    semesters = db.query(Semester).filter(Semester.org_id == org_id).order_by(Semester.code.asc()).all()
-    if not semesters and org.type in ["college", "university"]:
-        default_sems = [
+    if org.type in ["college", "university"]:
+        all_8_sems = [
             ("Semester 1", "S1", "2026-2027"),
+            ("Semester 2", "S2", "2026-2027"),
             ("Semester 3", "S3", "2026-2027"),
+            ("Semester 4", "S4", "2026-2027"),
             ("Semester 5", "S5", "2026-2027"),
+            ("Semester 6", "S6", "2026-2027"),
             ("Semester 7", "S7", "2026-2027"),
+            ("Semester 8", "S8", "2026-2027"),
         ]
-        for s_name, s_code, a_yr in default_sems:
-            new_sem = Semester(
-                org_id=org_id,
-                name=s_name,
-                code=s_code,
-                academic_year=a_yr,
-                is_active=True
-            )
-            db.add(new_sem)
-        db.commit()
-        semesters = db.query(Semester).filter(Semester.org_id == org_id).order_by(Semester.code.asc()).all()
+        existing_codes = {s.code for s in db.query(Semester.code).filter(Semester.org_id == org_id).all()}
+        added_any = False
+        for s_name, s_code, a_yr in all_8_sems:
+            if s_code not in existing_codes:
+                new_sem = Semester(
+                    org_id=org_id,
+                    name=s_name,
+                    code=s_code,
+                    academic_year=a_yr,
+                    is_active=True
+                )
+                db.add(new_sem)
+                added_any = True
+        if added_any:
+            db.commit()
+
+    all_sems = db.query(Semester).filter(Semester.org_id == org_id).all()
+    # Sort naturally by semester number
+    semesters = sorted(
+        all_sems,
+        key=lambda s: int(s.code.replace("S", "")) if (s.code and s.code.startswith("S") and s.code[1:].isdigit()) else 99
+    )
 
     sub_counts = {}
     for sem in semesters:

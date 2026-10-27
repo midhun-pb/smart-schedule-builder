@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from app.core.database import get_db
-from app.models.models import Assignment, RequirementSlot, Person, ReplacementLog, SwapRequest, AuditLog, Notification
+from app.models.models import Assignment, RequirementSlot, Person, ReplacementLog, SwapRequest, AuditLog, Notification, Organization, User, TeacherSubjectAssignment
 from app.schemas.schemas import ReplacementRecommendRequest, ReplacementApproveRequest
 from app.services.replacement_engine import ReplacementEngine
+from app.api.auth import get_current_user
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/replacements", tags=["replacements"])
@@ -13,9 +14,12 @@ class CreateSwapRequest(BaseModel):
     org_id: int
     requester_id: int
     requester_assignment_id: int
-    target_person_id: int
-    target_assignment_id: int
+    target_person_id: Optional[int] = None
+    target_assignment_id: Optional[int] = None
     reason: str
+
+class RejectSwapRequest(BaseModel):
+    reason: Optional[str] = "Manager rejected swap request"
 
 class TimetableSwapRequest(BaseModel):
     schedule_id: int
@@ -197,29 +201,85 @@ def create_swap_request(req: CreateSwapRequest, db: Session = Depends(get_db)):
 
 @router.get("/swaps")
 def list_swap_requests(org_id: int, db: Session = Depends(get_db)):
-    swaps = db.query(SwapRequest).filter(SwapRequest.org_id == org_id).all()
+    swaps = db.query(SwapRequest).filter(SwapRequest.org_id == org_id).order_by(SwapRequest.created_at.desc()).all()
     results = []
     for s in swaps:
+        req_assign = db.query(Assignment).filter(Assignment.id == s.requester_assignment_id).first()
+        tgt_assign = db.query(Assignment).filter(Assignment.id == s.target_assignment_id).first() if s.target_assignment_id else None
+
+        req_slot = req_assign.slot if req_assign else None
+        tgt_slot = tgt_assign.slot if tgt_assign else None
+
         results.append({
             "id": s.id,
+            "requester_id": s.requester_id,
             "requester_name": s.requester.name if s.requester else "Unknown",
-            "target_name": s.target_person.name if s.target_person else "Unknown",
+            "target_id": s.target_person_id,
+            "target_name": s.target_person.name if s.target_person else "Open Replacement",
             "reason": s.reason,
             "status": s.status,
-            "created_at": s.created_at
+            "approved_by": s.approved_by,
+            "created_at": s.created_at,
+            "requester_slot_title": req_slot.title if req_slot else None,
+            "requester_slot_time": f"{req_slot.start_time} - {req_slot.end_time}" if req_slot else None,
+            "target_slot_title": tgt_slot.title if tgt_slot else None,
+            "target_slot_time": f"{tgt_slot.start_time} - {tgt_slot.end_time}" if tgt_slot else None,
         })
     return results
 
 @router.post("/swaps/{swap_id}/approve")
-def approve_swap(swap_id: int, db: Session = Depends(get_db)):
+def approve_swap(swap_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     swap = db.query(SwapRequest).filter(SwapRequest.id == swap_id).first()
     if not swap:
         raise HTTPException(status_code=404, detail="Swap request not found")
 
-    # Exchange assignments
+    if current_user.role not in ["admin", "manager"]:
+        raise HTTPException(status_code=403, detail="Only managers and administrators can approve swap requests.")
+    if current_user.person_id and current_user.person_id == swap.requester_id:
+        raise HTTPException(status_code=403, detail="Employees cannot approve their own swap requests.")
+
     req_assign = db.query(Assignment).filter(Assignment.id == swap.requester_assignment_id).first()
     tgt_assign = db.query(Assignment).filter(Assignment.id == swap.target_assignment_id).first() if swap.target_assignment_id else None
 
+    # Check faculty subject eligibility for educational organizations
+    org = db.query(Organization).filter(Organization.id == swap.org_id).first()
+    if org and org.type in ["college", "university"]:
+        # Verify target faculty is qualified/authorized for requester's course
+        if req_assign and req_assign.slot and req_assign.slot.subject_id:
+            req_sub_id = req_assign.slot.subject_id
+            target_authorized = db.query(TeacherSubjectAssignment).filter(
+                TeacherSubjectAssignment.org_id == swap.org_id,
+                TeacherSubjectAssignment.person_id == swap.target_person_id,
+                TeacherSubjectAssignment.subject_id == req_sub_id
+            ).first()
+            if not target_authorized:
+                target_p = db.query(Person).filter(Person.id == swap.target_person_id).first()
+                target_skills = {s.get("name", "").lower() for s in (target_p.skills or [])} if target_p else set()
+                sub_obj = req_assign.slot.subject
+                if not (sub_obj and (sub_obj.name.lower() in target_skills or any(sk in sub_obj.name.lower() for sk in target_skills))):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Replacement faculty '{target_p.name if target_p else 'candidate'}' is not authorized or qualified to teach '{sub_obj.name if sub_obj else 'this subject'}'."
+                    )
+        # Verify requester faculty is qualified/authorized for target's course
+        if tgt_assign and tgt_assign.slot and tgt_assign.slot.subject_id:
+            tgt_sub_id = tgt_assign.slot.subject_id
+            req_authorized = db.query(TeacherSubjectAssignment).filter(
+                TeacherSubjectAssignment.org_id == swap.org_id,
+                TeacherSubjectAssignment.person_id == swap.requester_id,
+                TeacherSubjectAssignment.subject_id == tgt_sub_id
+            ).first()
+            if not req_authorized:
+                req_p = db.query(Person).filter(Person.id == swap.requester_id).first()
+                req_skills = {s.get("name", "").lower() for s in (req_p.skills or [])} if req_p else set()
+                sub_obj2 = tgt_assign.slot.subject
+                if not (sub_obj2 and (sub_obj2.name.lower() in req_skills or any(sk in sub_obj2.name.lower() for sk in req_skills))):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Faculty '{req_p.name if req_p else 'requester'}' is not authorized or qualified to teach '{sub_obj2.name if sub_obj2 else 'this subject'}'."
+                    )
+
+    # Exchange assignments immediately in the timetable
     if req_assign and tgt_assign:
         p1 = req_assign.person_id
         p2 = tgt_assign.person_id
@@ -229,10 +289,53 @@ def approve_swap(swap_id: int, db: Session = Depends(get_db)):
         tgt_assign.person_id = p1
         tgt_assign.is_replacement = True
         tgt_assign.replacement_type = "swap"
+    elif req_assign and swap.target_person_id:
+        req_assign.person_id = swap.target_person_id
+        req_assign.is_replacement = True
+        req_assign.replacement_type = "swap"
 
     swap.status = "approved"
+    swap.approved_by = current_user.full_name
+
+    # Audit log
+    audit = AuditLog(
+        org_id=swap.org_id,
+        action="SWAP_REQUEST_APPROVED",
+        entity_type="swap_request",
+        entity_id=str(swap.id),
+        details={"approved_by": current_user.full_name, "requester_id": swap.requester_id, "target_id": swap.target_person_id}
+    )
+    db.add(audit)
     db.commit()
-    return {"success": True, "message": "Swap approved and assignments exchanged."}
+
+    return {"success": True, "message": "Swap approved and timetable assignments updated successfully.", "status": "approved"}
+
+@router.post("/swaps/{swap_id}/reject")
+def reject_swap(swap_id: int, payload: RejectSwapRequest = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    swap = db.query(SwapRequest).filter(SwapRequest.id == swap_id).first()
+    if not swap:
+        raise HTTPException(status_code=404, detail="Swap request not found")
+
+    if current_user.role not in ["admin", "manager"]:
+        raise HTTPException(status_code=403, detail="Only managers and administrators can reject swap requests.")
+    if current_user.person_id and current_user.person_id == swap.requester_id:
+        raise HTTPException(status_code=403, detail="Employees cannot reject their own swap requests.")
+
+    swap.status = "rejected"
+    swap.approved_by = current_user.full_name
+    reason_text = payload.reason if payload and payload.reason else "Manager rejected swap request"
+
+    audit = AuditLog(
+        org_id=swap.org_id,
+        action="SWAP_REQUEST_REJECTED",
+        entity_type="swap_request",
+        entity_id=str(swap.id),
+        details={"rejected_by": current_user.full_name, "reason": reason_text}
+    )
+    db.add(audit)
+    db.commit()
+
+    return {"success": True, "message": "Swap request rejected", "status": "rejected", "reason": reason_text}
 
 @router.post("/timetable-swap")
 def execute_timetable_swap(req: TimetableSwapRequest, db: Session = Depends(get_db)):

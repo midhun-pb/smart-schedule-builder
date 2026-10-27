@@ -53,6 +53,7 @@ import {
   Search,
   BookOpen,
   GraduationCap,
+  Maximize2,
 } from 'lucide-react';
 
 const ALL_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -115,6 +116,8 @@ export const ScheduleModule: React.FC = () => {
   const [selectedDayView, setSelectedDayView] = useState<number>(0);
   const [filterDept, setFilterDept] = useState<string>('all');
   const [filterSemester, setFilterSemester] = useState<string>('all');
+  const [filterAcademicYear, setFilterAcademicYear] = useState<string>('all');
+  const [isFullWidth, setIsFullWidth] = useState<boolean>(false);
   const [filterClass, setFilterClass] = useState<string>('all');
   const [filterTeacher, setFilterTeacher] = useState<string>('all');
   const [filterSubject, setFilterSubject] = useState<string>('all');
@@ -699,11 +702,32 @@ export const ScheduleModule: React.FC = () => {
         const dId = Number(filterDept);
         if (slot.department_id && slot.department_id !== dId) return false;
       }
-      // 2. Semester Filter
+      // 2. Semester Filter (Supports S1..S8, Odd, Even)
       if (filterSemester !== 'all') {
-        const targetSem = filterSemester.trim().toLowerCase();
-        const slotSem = ((slot as any).semester || (slot as any).profession_metadata?.semester || '').trim().toLowerCase();
-        if (slotSem && !slotSem.includes(targetSem) && !targetSem.includes(slotSem)) return false;
+        const slotSem = ((slot as any).semester || (slot as any).profession_metadata?.semester || '').trim().toUpperCase();
+        if (filterSemester === 'odd') {
+          // Odd Semesters: S1, S3, S5, S7
+          const isOdd = /S[1357](\b|[^0-9])/.test(slotSem) || ['1', '3', '5', '7'].some((d) => slotSem.includes(d));
+          if (!isOdd) return false;
+        } else if (filterSemester === 'even') {
+          // Even Semesters: S2, S4, S6, S8
+          const isEven = /S[2468](\b|[^0-9])/.test(slotSem) || ['2', '4', '6', '8'].some((d) => slotSem.includes(d));
+          if (!isEven) return false;
+        } else {
+          // Exact semester match (S1, S2, ..., S8)
+          const targetSem = filterSemester.trim().toUpperCase();
+          if (slotSem && !slotSem.includes(targetSem) && !targetSem.includes(slotSem)) return false;
+        }
+      }
+      // 2b. Academic Year Filter
+      if (filterAcademicYear !== 'all') {
+        const slotYear = ((slot as any).academic_year || (slot as any).profession_metadata?.academic_year || '').trim();
+        const dateStr = slot.date_str || '';
+        if (slotYear && !slotYear.includes(filterAcademicYear)) return false;
+        if (!slotYear && dateStr) {
+          const yr = dateStr.slice(0, 4);
+          if (!filterAcademicYear.includes(yr)) return false;
+        }
       }
       // 3. Class Filter
       if (filterClass !== 'all') {
@@ -729,7 +753,7 @@ export const ScheduleModule: React.FC = () => {
       }
       return true;
     });
-  }, [slots, filterDept, filterSemester, filterClass, filterTeacher, filterSubject, subjectsList]);
+  }, [slots, filterDept, filterSemester, filterAcademicYear, filterClass, filterTeacher, filterSubject, subjectsList]);
 
 
   // Add new Slot
@@ -1166,11 +1190,12 @@ export const ScheduleModule: React.FC = () => {
     const isLocked = slot.is_locked;
     const isCollege = activeOrg?.type === 'college';
     const subjectName = slot.subject_name || slot.subject || (slot as any).profession_metadata?.subject;
+    const subjectCode = slot.subject_code || (slot as any).subject?.code || (slot as any).profession_metadata?.subject_code || (slot.subject_id ? subjectsList.find((s) => s.id === slot.subject_id)?.code : undefined);
     const semesterStr = slot.semester || (slot as any).profession_metadata?.semester || (isCollege ? 'S3' : '');
-    const deptName = slot.department_name || departmentsList.find((d) => d.id === slot.department_id)?.name || (isCollege ? 'Computer Science' : '');
+    const deptName = slot.department_name || departmentsList.find((d) => d.id === slot.department_id)?.name || (isCollege ? 'Computer Science & Engineering' : '');
     const className = slot.class_name || (slot as any).profession_metadata?.class_name || (isCollege ? 'S3 A' : '');
     const teacherName = slot.person_name;
-    const roomName = slot.resource_name || 'Room not assigned';
+    const roomName = slot.resource_name || 'Lecture Hall 101';
     const periodTitle = slot.title;
 
     return (
@@ -1274,15 +1299,22 @@ export const ScheduleModule: React.FC = () => {
           </div>
         </div>
 
-        {/* 1. SUBJECT NAME IN BOLD (Most Prominent Item) */}
+        {/* 1. SUBJECT NAME IN BOLD & CODE */}
         <div className="space-y-1">
           {isBreak ? (
             <div className="text-xs font-black text-slate-500 italic">
               {slot.period_type === 'lunch' ? 'Lunch Break' : periodTitle || 'Recess Interval'}
             </div>
           ) : subjectName ? (
-            <div className="text-xs font-black text-blue-600 dark:text-blue-400 leading-tight tracking-tight">
-              {subjectName}
+            <div>
+              <div className="text-xs font-black text-blue-600 dark:text-blue-400 leading-tight tracking-tight uppercase">
+                {subjectName}
+              </div>
+              {subjectCode && (
+                <div className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                  Code: <span className="text-slate-700 dark:text-slate-200">{subjectCode}</span>
+                </div>
+              )}
             </div>
           ) : isCollege ? (
             <div className="text-xs font-black text-amber-500 dark:text-amber-400 leading-tight flex items-center gap-1">
@@ -1295,20 +1327,23 @@ export const ScheduleModule: React.FC = () => {
             </div>
           )}
 
-          {/* 2. SEMESTER & DEPARTMENT LINE (Semester: S3 | Department: Computer Science) */}
+          {/* 2. SEMESTER & DEPARTMENT LINE */}
           {!isBreak && isCollege && (
-            <div className="text-[10px] font-bold text-slate-600 dark:text-slate-300 flex items-center gap-1 flex-wrap">
-              <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 font-extrabold border border-blue-500/20">
-                Semester: {semesterStr || 'S3'}
-              </span>
-              <span className="text-slate-300 dark:text-slate-600">|</span>
-              <span className="truncate text-slate-600 dark:text-slate-400">
-                Dept: {deptName || 'Computer Science'}
-              </span>
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold space-y-0.5">
+              <div className="flex items-center gap-1">
+                <span className="text-slate-400">Semester:</span>
+                <span className="font-extrabold text-blue-700 dark:text-blue-300">{semesterStr || 'S3'}</span>
+              </div>
+              {deptName && (
+                <div className="truncate flex items-center gap-1">
+                  <span className="text-slate-400">Department:</span>
+                  <span className="truncate text-slate-700 dark:text-slate-200">{deptName}</span>
+                </div>
+              )}
             </div>
           )}
 
-          {/* 3. CLASS (Class: S3 A) */}
+          {/* 3. CLASS */}
           {!isBreak && className && (
             <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
               <span className="text-slate-400">Class:</span>
@@ -1316,12 +1351,12 @@ export const ScheduleModule: React.FC = () => {
             </div>
           )}
 
-          {/* 4. TEACHER (Teacher: Dr. Alan Turing) */}
+          {/* 4. FACULTY NAME */}
           {!isBreak && (
-            <div className="text-[10px] text-slate-600 dark:text-slate-300 flex items-center gap-1">
-              <span className="text-slate-400">Teacher:</span>
+            <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+              <span className="text-slate-400">Faculty:</span>
               {teacherName ? (
-                <span className="font-bold text-slate-800 dark:text-slate-100 truncate">
+                <span className="font-bold text-slate-900 dark:text-slate-100 truncate">
                   {teacherName}
                 </span>
               ) : (
@@ -1332,18 +1367,21 @@ export const ScheduleModule: React.FC = () => {
             </div>
           )}
 
-          {/* 5. ROOM (Room: Lecture Hall 101) & TIME */}
+          {/* 5. TIME */}
+          <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex items-center gap-1">
+            <span className="text-slate-400">Time:</span>
+            <span className="font-mono font-bold text-blue-600 dark:text-blue-400">{slot.start_time}–{slot.end_time}</span>
+          </div>
+
+          {/* 6. ROOM OR LABORATORY */}
           <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between gap-1 pt-1 border-t border-slate-200/40 dark:border-slate-800/40">
             <span className="truncate flex items-center gap-1">
               <MapPin className="w-2.5 h-2.5 text-slate-400 flex-shrink-0" />
-              <span>Room: {roomName}</span>
-            </span>
-            <span className="font-mono text-[9px] text-blue-600 dark:text-blue-400 font-bold whitespace-nowrap">
-              {slot.start_time}–{slot.end_time}
+              <span>Room: <span className="font-medium text-slate-700 dark:text-slate-300">{roomName}</span></span>
             </span>
           </div>
 
-          {/* 7. SECONDARY INFO: Period Name (e.g. "Morning Period 1") */}
+          {/* 7. SECONDARY INFO: Period Name */}
           {!isBreak && periodTitle && periodTitle !== subjectName && (
             <div className="text-[9px] italic text-slate-400 truncate">
               Period: {periodTitle}
@@ -1932,13 +1970,14 @@ export const ScheduleModule: React.FC = () => {
                   </div>
 
                   {/* Active filters status / Clear button */}
-                  {(filterDept !== 'all' || filterSemester !== 'all' || filterClass !== 'all' || filterTeacher !== 'all' || filterSubject !== 'all') && (
+                  {(filterDept !== 'all' || filterSemester !== 'all' || filterAcademicYear !== 'all' || filterClass !== 'all' || filterTeacher !== 'all' || filterSubject !== 'all') && (
                     <button
                       type="button"
                       onClick={() => {
                         triggerHaptic(8);
                         setFilterDept('all');
                         setFilterSemester('all');
+                        setFilterAcademicYear('all');
                         setFilterClass('all');
                         setFilterTeacher('all');
                         setFilterSubject('all');
@@ -1951,11 +1990,57 @@ export const ScheduleModule: React.FC = () => {
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+                  {/* Academic Year Filter */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Academic Year:
+                    </label>
+                    <select
+                      value={filterAcademicYear}
+                      onChange={(e) => {
+                        triggerHaptic(5);
+                        setFilterAcademicYear(e.target.value);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    >
+                      <option value="all">All Academic Years</option>
+                      <option value="2026-2027">2026–2027 (Current)</option>
+                      <option value="2025-2026">2025–2026</option>
+                      <option value="2024-2025">2024–2025</option>
+                    </select>
+                  </div>
+
+                  {/* Semester Filter: All 8 Semesters + Odd / Even */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Semester:
+                    </label>
+                    <select
+                      value={filterSemester}
+                      onChange={(e) => {
+                        triggerHaptic(5);
+                        setFilterSemester(e.target.value);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                    >
+                      <option value="all">All Semesters</option>
+                      <option value="odd">Odd Semesters (S1, S3, S5, S7)</option>
+                      <option value="even">Even Semesters (S2, S4, S6, S8)</option>
+                      <optgroup label="Individual Semesters">
+                        {['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'].map((sem) => (
+                          <option key={sem} value={sem}>
+                            Semester {sem}
+                          </option>
+                        ))}
+                      </optgroup>
+                    </select>
+                  </div>
+
                   {/* Teacher Filter */}
                   <div>
                     <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                      Teacher:
+                      Teacher / Faculty:
                     </label>
                     <select
                       value={filterTeacher}
@@ -1991,31 +2076,6 @@ export const ScheduleModule: React.FC = () => {
                       {departmentsList.map((d) => (
                         <option key={d.id} value={d.id}>
                           {d.name} ({d.code})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Semester Filter */}
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                      Semester:
-                    </label>
-                    <select
-                      value={filterSemester}
-                      onChange={(e) => {
-                        triggerHaptic(5);
-                        setFilterSemester(e.target.value);
-                      }}
-                      className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
-                    >
-                      <option value="all">All Semesters</option>
-                      {(semestersList.length > 0
-                        ? semestersList.map((s) => s.code || s.name)
-                        : ['S1', 'S3', 'S5', 'S7']
-                      ).map((sem) => (
-                        <option key={sem} value={sem}>
-                          Semester {sem}
                         </option>
                       ))}
                     </select>
@@ -2080,7 +2140,7 @@ export const ScheduleModule: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-[11px] text-slate-400 font-medium">Layout:</span>
                   <div className="p-1 rounded-xl glass-panel border border-white/20 dark:border-white/10 flex items-center gap-1">
                     <button
@@ -2096,7 +2156,7 @@ export const ScheduleModule: React.FC = () => {
                       }`}
                     >
                       <Layers className="w-3.5 h-3.5" />
-                      <span>Days on Left (Classic)</span>
+                      <span>Days on Left</span>
                     </button>
                     <button
                       type="button"
@@ -2114,17 +2174,79 @@ export const ScheduleModule: React.FC = () => {
                       <span>Days as Columns</span>
                     </button>
                   </div>
+
+                  {/* Full Width Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic(8);
+                      setIsFullWidth((prev) => !prev);
+                    }}
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5 border ${
+                      isFullWidth
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                        : 'glass-panel text-slate-700 dark:text-slate-300 border-white/20 dark:border-white/10 hover:border-blue-400'
+                    }`}
+                    title="Toggle full screen desktop timetable width"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5" />
+                    <span>{isFullWidth ? 'Standard View' : 'Full Width View'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Clear Timetable Legend */}
+              <div className="p-3 rounded-2xl glass-panel border border-white/30 dark:border-white/10 flex flex-wrap items-center gap-4 text-xs font-medium">
+                <span className="font-bold text-slate-700 dark:text-slate-300 text-[11px] uppercase tracking-wider flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+                  <span>Legend:</span>
+                </span>
+
+                <div className="flex items-center gap-1.5">
+                  <div className="w-3 h-3 rounded-sm bg-blue-500/10 border border-blue-500/40" />
+                  <span className="text-slate-600 dark:text-slate-400 text-[11px]">Active Class / Period</span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <div className="w-3 h-3 rounded-sm bg-slate-200/50 dark:bg-slate-800/50 border border-dashed border-slate-400" />
+                  <span className="text-slate-600 dark:text-slate-400 text-[11px]">Break / Lunch</span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <div className="w-3 h-3 rounded-sm bg-amber-500/10 border border-amber-500/50" />
+                  <span className="text-slate-600 dark:text-slate-400 text-[11px]">Free Period / Unassigned</span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <div className="w-3 h-3 rounded-sm bg-amber-500/15 border border-amber-400 flex items-center justify-center">
+                    <ArrowRightLeft className="w-2 h-2 text-amber-500" />
+                  </div>
+                  <span className="text-slate-600 dark:text-slate-400 text-[11px]">Shift / Assignment Swap</span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <div className="w-3 h-3 rounded-sm bg-red-500/15 border border-red-500/60" />
+                  <span className="text-slate-600 dark:text-slate-400 text-[11px]">Understaffed / Conflict</span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <div className="w-3 h-3 rounded-sm bg-purple-500/15 border border-purple-500/60 flex items-center justify-center">
+                    <Lock className="w-2 h-2 text-purple-500" />
+                  </div>
+                  <span className="text-slate-600 dark:text-slate-400 text-[11px]">Locked Assignment</span>
                 </div>
               </div>
 
               {/* LAYOUT 1: DAYS ON LEFT (INSTITUTIONAL TIMETABLE FORMAT) */}
               {timetableLayout === 'days-left' ? (
-                <div className="rounded-3xl glass-panel border border-white/40 dark:border-white/10 overflow-hidden shadow-sm">
-                  <div className="overflow-x-auto">
+                <div className={`rounded-3xl glass-panel border border-white/40 dark:border-white/10 overflow-hidden shadow-sm ${
+                  isFullWidth ? 'w-full max-w-none' : ''
+                }`}>
+                  <div className="overflow-x-auto max-h-[72vh] overflow-y-auto">
                     <table className="w-full border-collapse min-w-[1050px]">
-                      <thead>
-                        <tr className="bg-slate-100/70 dark:bg-slate-900/70 border-b border-slate-200/60 dark:border-slate-800/80">
-                          <th className="py-3 px-4 text-left font-extrabold text-xs text-slate-700 dark:text-slate-200 border-r border-slate-200/40 dark:border-slate-800/40 sticky left-0 z-20 bg-slate-100/95 dark:bg-slate-900/95 backdrop-blur-md w-44">
+                      <thead className="sticky top-0 z-30 bg-slate-100/95 dark:bg-slate-900/95 backdrop-blur-md">
+                        <tr className="border-b border-slate-200/60 dark:border-slate-800/80">
+                          <th className="py-3 px-4 text-left font-extrabold text-xs text-slate-700 dark:text-slate-200 border-r border-slate-200/40 dark:border-slate-800/40 sticky left-0 top-0 z-40 bg-slate-100/95 dark:bg-slate-900/95 backdrop-blur-md w-44">
                             Day / Schedule
                           </th>
                           {distinctTimeBands.map((band, bIdx) => (
@@ -2229,7 +2351,9 @@ export const ScheduleModule: React.FC = () => {
                 </div>
               ) : (
                 /* LAYOUT 2: DAYS AS COLUMNS (VERTICAL GRID) */
-                <div className="rounded-3xl glass-panel border border-white/40 dark:border-white/10 overflow-hidden shadow-sm">
+                <div className={`rounded-3xl glass-panel border border-white/40 dark:border-white/10 overflow-hidden shadow-sm ${
+                  isFullWidth ? 'w-full max-w-none' : ''
+                }`}>
                   <div className="overflow-x-auto">
                     <div className="min-w-[950px]">
                       {/* Header row: Days with Full Detailed Dates */}

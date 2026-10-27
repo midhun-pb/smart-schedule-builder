@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from app.core.database import get_db
-from app.models.models import LeaveRequest, AvailabilityRule, Person, Assignment, AuditLog, Notification
+from app.models.models import LeaveRequest, AvailabilityRule, Person, Assignment, AuditLog, Notification, User
 from app.schemas.schemas import LeaveRequestCreate, AvailabilityRuleUpdate, ReturnToWorkRequest
 from app.services.replacement_engine import ReplacementEngine
+from app.api.auth import get_current_user
 from datetime import datetime, timezone
 
 router = APIRouter(prefix="/leave", tags=["leave"])
@@ -149,10 +150,15 @@ def request_day_off(req: LeaveRequestCreate, db: Session = Depends(get_db)):
     return {"success": True, "leave_id": leave_entry.id, "status": "pending"}
 
 @router.post("/{leave_id}/approve")
-def approve_leave(leave_id: int, db: Session = Depends(get_db)):
+def approve_leave(leave_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     leave = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
     if not leave:
         raise HTTPException(status_code=404, detail="Leave request not found")
+
+    if current_user.role not in ["admin", "manager"]:
+        raise HTTPException(status_code=403, detail="Only managers and administrators can approve leave requests.")
+    if current_user.person_id and current_user.person_id == leave.person_id:
+        raise HTTPException(status_code=403, detail="Employees cannot approve their own leave requests.")
 
     leave.status = "approved"
     
@@ -171,10 +177,15 @@ def approve_leave(leave_id: int, db: Session = Depends(get_db)):
     return {"success": True, "status": "approved", "affected_slots": len(affected)}
 
 @router.post("/{leave_id}/reject")
-def reject_leave(leave_id: int, db: Session = Depends(get_db)):
+def reject_leave(leave_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     leave = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
     if not leave:
         raise HTTPException(status_code=404, detail="Leave request not found")
+
+    if current_user.role not in ["admin", "manager"]:
+        raise HTTPException(status_code=403, detail="Only managers and administrators can reject leave requests.")
+    if current_user.person_id and current_user.person_id == leave.person_id:
+        raise HTTPException(status_code=403, detail="Employees cannot reject their own leave requests.")
 
     leave.status = "rejected"
     db.commit()

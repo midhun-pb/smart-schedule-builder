@@ -113,6 +113,14 @@ class SearchEngine:
         if dept_match:
             extracted["metadata"]["department"] = dept_match.group(1).upper()
 
+        # 8. Extract role intent (faculty vs general employee)
+        if any(w in q_lower for w in ["faculty", "professor", "teacher", "lecturer", "instructor", "hod", "academic"]):
+            extracted["target_role"] = "faculty"
+        elif any(w in q_lower for w in ["employee", "staff", "technician", "clerk", "operator", "duty"]):
+            extracted["target_role"] = "employee"
+        else:
+            extracted["target_role"] = None
+
         return extracted
 
     def rank_candidates(
@@ -125,22 +133,27 @@ class SearchEngine:
     ) -> List[Dict[str, Any]]:
         """
         Ranks real candidates using TF-IDF text similarity and multi-factor matching.
+        Distinguishes formally assigned faculty from skill-qualified candidates.
         """
         if not candidates:
             return []
 
         parsed = self.parse_query(query)
         leave_records = leave_records or []
+        target_role = parsed.get("target_role")
 
-        # Build textual representation for each candidate
+        # Build textual representation for each candidate including actual subjects and departments
         corpus = []
         for c in candidates:
             c_skills = " ".join([s.get("name", "") for s in c.get("skills", [])])
             c_inf_skills = " ".join([s.get("name", "") for s in c.get("inferred_skills", [])])
             c_quals = " ".join(c.get("qualifications", []))
-            c_dept = str(c.get("department_id", ""))
+            c_dept = c.get("department_name", "") or str(c.get("department_id", ""))
             c_role = c.get("role_title", "")
-            c_text = f"{c.get('name', '')} {c_role} {c_dept} {c_skills} {c_inf_skills} {c_quals}"
+            c_role_tag = "faculty teacher professor academic" if c.get("is_faculty") else "employee staff operational"
+            c_assigned = " ".join(c.get("assigned_subject_names", [])) + " " + " ".join(c.get("assigned_subject_codes", []))
+            c_semesters = " ".join(c.get("assigned_semesters", []))
+            c_text = f"{c.get('name', '')} {c_role} {c_role_tag} {c_dept} {c_skills} {c_inf_skills} {c_quals} {c_assigned} {c_semesters}"
             corpus.append(c_text)
 
         # Fit TF-IDF on corpus + query
@@ -155,8 +168,6 @@ class SearchEngine:
             text_sims = [0.5] * len(candidates)
 
         ranked_results = []
-        target_day = parsed.get("day_of_week")
-        target_time = parsed.get("time")
 
         for idx, candidate in enumerate(candidates):
             c_id = candidate.get("id")
@@ -165,48 +176,74 @@ class SearchEngine:
                 "qualification_match": 0.0,
                 "availability_match": 100.0,
                 "experience_match": 100.0,
+                "authorization_boost": 0.0,
                 "text_similarity": float(text_sims[idx]) * 100.0
             }
             explanations = []
             missing_requirements = []
             rejection_reasons = []
 
-            # 1. Skill evaluation
+            # 1. Role match evaluation
+            is_fac = candidate.get("is_faculty", False)
+            if target_role == "faculty":
+                if is_fac:
+                    explanations.append("Role Match: Teaching Faculty Member")
+                    score_components["authorization_boost"] += 15.0
+                else:
+                    rejection_reasons.append("Role Mismatch: General employee, not authorized teaching faculty")
+                    score_components["authorization_boost"] -= 25.0
+            elif target_role == "employee":
+                if not is_fac:
+                    explanations.append("Role Match: General Employee")
+                    score_components["authorization_boost"] += 10.0
+
+            # 2. Subject assignments vs skills evaluation
+            assigned_names = [s.lower() for s in candidate.get("assigned_subject_names", [])]
             c_skill_names = {s.get("name", "").lower(): s for s in candidate.get("skills", [])}
             c_inf_skill_names = {s.get("name", "").lower(): s for s in candidate.get("inferred_skills", [])}
-            
+
             matched_skills_count = 0
+            has_formal_auth = False
+
             if parsed["skills"]:
                 for req_sk in parsed["skills"]:
                     req_lower = req_sk.lower()
-                    if req_lower in c_skill_names:
-                        matched_skills_count += 1
+                    # Check formal subject assignment first
+                    if any(req_lower in sub_name for sub_name in assigned_names):
+                        matched_skills_count += 1.5
+                        has_formal_auth = True
+                        score_components["authorization_boost"] += 20.0
+                        explanations.append(f"Formal Teaching Authorization: Officially assigned to teach {req_sk}")
+                    elif req_lower in c_skill_names:
+                        matched_skills_count += 1.0
                         lvl = c_skill_names[req_lower].get("level", "Intermediate")
-                        explanations.append(f"Direct verified skill match for {req_sk} ({lvl})")
+                        explanations.append(f"Skill Qualified for {req_sk} ({lvl}) — holds verified competence")
                     elif req_lower in c_inf_skill_names:
                         matched_skills_count += 0.8
                         conf = int(c_inf_skill_names[req_lower].get("confidence", 0.8) * 100)
-                        explanations.append(f"Inferred complementary skill match for {req_sk} ({conf}% confidence)")
+                        explanations.append(f"Inferred complementary competence in {req_sk} ({conf}% confidence)")
                     else:
-                        missing_requirements.append(f"Missing skill: {req_sk}")
+                        missing_requirements.append(f"Missing skill/subject: {req_sk}")
 
-                score_components["skill_match"] = (matched_skills_count / len(parsed["skills"])) * 100.0
+                score_components["skill_match"] = min(100.0, (matched_skills_count / len(parsed["skills"])) * 100.0)
             else:
                 score_components["skill_match"] = 80.0
 
-            # 2. Qualifications evaluation
+            candidate["formal_teaching_authorization"] = has_formal_auth
+
+            # 3. Qualifications evaluation
             c_quals = [q.lower() for q in candidate.get("qualifications", [])]
             if parsed["qualifications"]:
                 matched_q = sum(1 for q in parsed["qualifications"] if any(q.lower() in cq for cq in c_quals))
                 score_components["qualification_match"] = (matched_q / len(parsed["qualifications"])) * 100.0
                 if matched_q > 0:
-                    explanations.append(f"Holds required qualification(s)")
+                    explanations.append("Holds verified qualification(s)")
                 else:
-                    missing_requirements.append(f"Missing required qualification(s)")
+                    missing_requirements.append("Missing required qualification(s)")
             else:
                 score_components["qualification_match"] = 90.0
 
-            # 3. Availability check
+            # 4. Availability check
             is_on_leave = False
             for l in leave_records:
                 if l.get("person_id") == c_id:
@@ -219,12 +256,13 @@ class SearchEngine:
             else:
                 explanations.append("Available without leave conflicts")
 
-            # 4. Overall Weighted Score
+            # 5. Overall Weighted Score
             overall_score = (
-                score_components["skill_match"] * 0.40 +
-                score_components["availability_match"] * 0.25 +
+                score_components["skill_match"] * 0.35 +
+                score_components["availability_match"] * 0.20 +
                 score_components["qualification_match"] * 0.15 +
-                score_components["text_similarity"] * 0.20
+                score_components["text_similarity"] * 0.20 +
+                score_components["authorization_boost"] * 0.10
             )
 
             if is_on_leave:
@@ -237,7 +275,7 @@ class SearchEngine:
                 "explanations": explanations,
                 "missing_requirements": missing_requirements,
                 "rejection_reasons": rejection_reasons,
-                "is_recommended": overall_score >= 70.0 and not is_on_leave
+                "is_recommended": overall_score >= 65.0 and not is_on_leave
             })
 
         # Sort descending by match percentage

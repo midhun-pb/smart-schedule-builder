@@ -34,6 +34,32 @@ class SchedulingEngine:
         return parse_time_to_minutes(time_str)
 
     @staticmethod
+    def _is_faculty(person: Dict[str, Any], teacher_assignments: List[Dict[str, Any]]) -> bool:
+        p_id = person.get("id")
+        if any(ta.get("person_id") == p_id for ta in teacher_assignments):
+            return True
+        meta = person.get("profession_metadata") or {}
+        if meta.get("is_faculty") is True:
+            return True
+        role = (person.get("role_title") or "").lower()
+        non_teaching_roles = [
+            "clerk", "accountant", "security", "driver", "librarian",
+            "technician", "attendant", "peon", "support", "maintenance",
+            "warden", "receptionist", "custodian", "officer", "nurse", "operator"
+        ]
+        if any(nt in role for nt in non_teaching_roles):
+            return False
+        faculty_roles = [
+            "professor", "lecturer", "faculty", "teacher", "instructor",
+            "dean", "hod", "chair", "tutor", "fellow"
+        ]
+        if any(f in role for f in faculty_roles):
+            return True
+        if person.get("profession_type") in ["college", "university"] and not any(nt in role for nt in non_teaching_roles):
+            return True
+        return False
+
+    @staticmethod
     def _is_qualified(person: Dict[str, Any], slot: Dict[str, Any]) -> Tuple[bool, str]:
         req_skills = slot.get("required_skills", []) or []
         req_quals = slot.get("required_qualifications", []) or []
@@ -204,6 +230,12 @@ class SchedulingEngine:
                 # If this slot was explicitly provisioned for this person, they are qualified
                 if slot_target_pid and slot_target_pid == p_id:
                     eligible_candidates[s_idx].append(p_idx)
+                    continue
+
+                # Faculty vs General Employee distinction for academic courses
+                is_fac = self._is_faculty(person, teacher_assignments)
+                if slot_sub_id and not is_fac:
+                    disqualification_reasons[(s_idx, p_idx)] = "Non-teaching staff not authorized to teach university courses"
                     continue
 
                 # 2. Dedicated Teacher-Subject Assignment check
@@ -464,9 +496,18 @@ class SchedulingEngine:
                 slot = slots[s_idx]
                 if solver.Value(unfilled[s_idx]) == 1:
                     unfilled_list.append(slot.get("id"))
-                    conflicts.append(
-                        f"Slot '{slot.get('title')}' ({slot.get('date_str') or 'Day ' + str(slot.get('day_of_week'))} {slot.get('start_time')}-{slot.get('end_time')}) could not be staffed due to lack of qualified or available staff."
-                    )
+                    reasons_for_slot = []
+                    for p_idx, person in enumerate(people):
+                        r = disqualification_reasons.get((s_idx, p_idx))
+                        if r:
+                            reasons_for_slot.append(f"{person.get('name')}: {r}")
+                    conflict_detail = f"Slot '{slot.get('title')}' ({slot.get('date_str') or 'Day ' + str(slot.get('day_of_week'))} {slot.get('start_time')}-{slot.get('end_time')}) could not be staffed."
+                    if reasons_for_slot:
+                        distinct_reasons = list(dict.fromkeys(reasons_for_slot))[:3]
+                        conflict_detail += f" Conflicts: {'; '.join(distinct_reasons)}"
+                    else:
+                        conflict_detail += " No staff met availability or qualification constraints."
+                    conflicts.append(conflict_detail)
                 else:
                     assigned_person = None
                     for p_idx in eligible_candidates[s_idx]:
@@ -489,17 +530,27 @@ class SchedulingEngine:
                         })
 
             # Post-solve fairness verification: If any person is still unassigned but has available slots,
-            # assign them to unfilled non-conflicting slots.
+            # assign them to unfilled non-conflicting slots (respecting subject authorization).
             unassigned_people = [p for p in people if person_counts.get(p["id"], 0) == 0]
             if unassigned_people and unfilled_list:
                 for p in unassigned_people:
                     p_id = p["id"]
+                    is_p_fac = self._is_faculty(p, teacher_assignments)
                     for s_id in list(unfilled_list):
                         slot_dict = next((s for s in slots if s.get("id") == s_id), None)
                         if not slot_dict:
                             continue
                         if self._is_on_leave(p_id, slot_dict, leave_records):
                             continue
+
+                        s_sub_id = slot_dict.get("subject_id") or (slot_dict.get("profession_metadata") or {}).get("subject_id")
+                        # For academic subjects, only assign authorized/qualified faculty
+                        if s_sub_id:
+                            if not is_p_fac:
+                                continue
+                            if s_sub_id in teacher_subject_map and p_id not in teacher_subject_map[s_sub_id]:
+                                continue
+
                         p_assigns = [a for a in final_assignments if a["person_id"] == p_id]
                         overlap = False
                         s_start = slot_dict.get("start_time", "00:00")

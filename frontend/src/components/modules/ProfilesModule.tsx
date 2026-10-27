@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../api/client';
-import { Person, Semester, Subject, Department, TeacherSubjectAssignment } from '../../types';
+import { Person, Semester, Subject, Department, TeacherSubjectAssignment, SkillItem } from '../../types';
 import { triggerHaptic } from '../../utils/haptics';
 import {
   Users,
@@ -94,6 +94,12 @@ export const ProfilesModule: React.FC = () => {
   const [editCode, setEditCode] = useState('');
   const [editHoursLimit, setEditHoursLimit] = useState(40);
   const [editQualsStr, setEditQualsStr] = useState('');
+  const [editQualsList, setEditQualsList] = useState<string[]>([]);
+  const [editSkills, setEditSkills] = useState<SkillItem[]>([]);
+  const [newSkillName, setNewSkillName] = useState('');
+  const [newSkillLevel, setNewSkillLevel] = useState('Intermediate');
+  const [newSkillYears, setNewSkillYears] = useState(2);
+  const [newQualText, setNewQualText] = useState('');
   const [editAssignments, setEditAssignments] = useState<FormAssignmentRow[]>([]);
   const [isSavingTeacher, setIsSavingTeacher] = useState(false);
 
@@ -203,10 +209,62 @@ export const ProfilesModule: React.FC = () => {
       setEditCode(selectedPerson.employee_code || '');
       setEditHoursLimit(selectedPerson.max_hours_per_week || 40);
       setEditQualsStr((selectedPerson.qualifications || []).join(', '));
+      setEditQualsList(selectedPerson.qualifications || []);
+      setEditSkills(selectedPerson.skills || []);
       setIsEditingInModal(false);
       loadPersonAssignments(selectedPerson.id);
     }
   }, [selectedPerson]);
+
+  const handleAddEditSkill = (skillNameToAdd?: string) => {
+    const rawName = skillNameToAdd || newSkillName;
+    if (!rawName.trim()) return;
+    triggerHaptic(10);
+    const trimmed = rawName.trim();
+    if (editSkills.some((s) => s.name.toLowerCase() === trimmed.toLowerCase())) {
+      addToast('Skill already exists', `"${trimmed}" is already added.`, 'error');
+      return;
+    }
+    setEditSkills((prev) => [
+      ...prev,
+      {
+        name: trimmed,
+        level: newSkillLevel,
+        verified: true,
+        years: Number(newSkillYears) || 2.0,
+      },
+    ]);
+    setNewSkillName('');
+    addToast('Skill Added', `Added "${trimmed}" (${newSkillLevel})`, 'success');
+  };
+
+  const handleRemoveEditSkill = (skillIndex: number) => {
+    triggerHaptic(12);
+    setEditSkills((prev) => prev.filter((_, idx) => idx !== skillIndex));
+  };
+
+  const handleUpdateEditSkillLevel = (skillIndex: number, level: string) => {
+    setEditSkills((prev) => {
+      const copy = [...prev];
+      copy[skillIndex] = { ...copy[skillIndex], level };
+      return copy;
+    });
+  };
+
+  const handleAddQual = () => {
+    if (!newQualText.trim()) return;
+    triggerHaptic(10);
+    const trimmed = newQualText.trim();
+    if (!editQualsList.includes(trimmed)) {
+      setEditQualsList((prev) => [...prev, trimmed]);
+    }
+    setNewQualText('');
+  };
+
+  const handleRemoveQual = (index: number) => {
+    triggerHaptic(12);
+    setEditQualsList((prev) => prev.filter((_, idx) => idx !== index));
+  };
 
   // Handlers for Add Form Assignment Rows
   const handleAddFormAssignment = () => {
@@ -541,6 +599,10 @@ export const ProfilesModule: React.FC = () => {
           };
         });
 
+      const finalQuals = editQualsList.length > 0
+        ? editQualsList
+        : (editQualsStr ? editQualsStr.split(',').map((q) => q.trim()).filter(Boolean) : []);
+
       await api.updatePerson(selectedPerson.id, {
         name: editName,
         email: editEmail,
@@ -548,8 +610,8 @@ export const ProfilesModule: React.FC = () => {
         role_title: editRole,
         employee_code: editCode,
         department_id: editDeptId,
-        qualifications: qualsArray,
-        skills: selectedPerson.skills || [],
+        qualifications: finalQuals,
+        skills: editSkills,
         max_hours_per_week: editHoursLimit,
         status: selectedPerson.status || 'active',
         profession_metadata: {
@@ -1553,6 +1615,191 @@ export const ProfilesModule: React.FC = () => {
                   </div>
                 </div>
 
+                {/* Section: EDITABLE SKILLS & QUALIFICATIONS */}
+                <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-4 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                        <Sparkles className="w-4 h-4 text-amber-500" />
+                        <span>Skills & Qualifications (Subject & Duty Eligibility)</span>
+                      </h4>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Manage professional skills, certifications, and formal academic eligibility. Real skills are used by Intelligent Search and GLIXON.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Skills Editor Grid */}
+                  <div className="p-4 rounded-2xl glass-panel border border-white/40 dark:border-white/10 space-y-3">
+                    <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 block">
+                      Add New Skill & Proficiency:
+                    </span>
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 text-xs">
+                      <div className="sm:col-span-5">
+                        <input
+                          type="text"
+                          placeholder="e.g. Machine Learning, Data Structures, Customer Support"
+                          value={newSkillName}
+                          onChange={(e) => setNewSkillName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleAddEditSkill();
+                            }
+                          }}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        />
+                      </div>
+                      <div className="sm:col-span-3">
+                        <select
+                          value={newSkillLevel}
+                          onChange={(e) => setNewSkillLevel(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                        >
+                          <option value="Beginner">Beginner</option>
+                          <option value="Intermediate">Intermediate</option>
+                          <option value="Advanced">Advanced</option>
+                          <option value="Expert">Expert</option>
+                        </select>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <input
+                          type="number"
+                          min="0"
+                          max="40"
+                          step="0.5"
+                          placeholder="Years"
+                          value={newSkillYears}
+                          onChange={(e) => setNewSkillYears(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-xl glass-input text-xs text-center"
+                          title="Years of experience"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <button
+                          type="button"
+                          onClick={() => handleAddEditSkill()}
+                          className="w-full py-2 px-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center justify-center gap-1 shadow-sm transition-all"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Add</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Quick Suggestions */}
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                      <span className="text-[10px] text-slate-400 font-semibold mr-1">Quick Add:</span>
+                      {(activeOrg?.type === 'college'
+                        ? ['Machine Learning', 'Data Structures', 'Database Systems', 'Artificial Intelligence', 'Computer Networks']
+                        : ['Customer Support', 'Inventory Management', 'Equipment Operation', 'Emergency Response']
+                      ).map((sug) => (
+                        <button
+                          key={sug}
+                          type="button"
+                          onClick={() => handleAddEditSkill(sug)}
+                          className="px-2 py-0.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400 text-[10px] font-semibold border border-blue-500/20 transition-colors"
+                        >
+                          + {sug}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Current Skills List */}
+                    <div className="space-y-1.5 pt-2 border-t border-slate-200/40 dark:border-slate-800/40">
+                      <div className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                        Current Skills ({editSkills.length}):
+                      </div>
+                      {editSkills.length === 0 ? (
+                        <p className="text-xs text-slate-400 italic">No skills listed yet.</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {editSkills.map((sk, skIdx) => (
+                            <div
+                              key={skIdx}
+                              className="px-2.5 py-1.5 rounded-xl glass-card border border-white/40 dark:border-white/10 flex items-center gap-2 text-xs"
+                            >
+                              <span className="font-bold text-slate-800 dark:text-slate-200">{sk.name}</span>
+                              <select
+                                value={sk.level}
+                                onChange={(e) => handleUpdateEditSkillLevel(skIdx, e.target.value)}
+                                className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 border-none cursor-pointer"
+                              >
+                                <option value="Beginner">Beginner</option>
+                                <option value="Intermediate">Intermediate</option>
+                                <option value="Advanced">Advanced</option>
+                                <option value="Expert">Expert</option>
+                              </select>
+                              <span className="text-[10px] text-slate-400">{sk.years}y</span>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveEditSkill(skIdx)}
+                                className="p-0.5 text-slate-400 hover:text-red-500 transition-colors"
+                                title="Remove skill"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Qualifications Editor */}
+                  <div className="p-4 rounded-2xl glass-panel border border-white/40 dark:border-white/10 space-y-3">
+                    <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 block">
+                      Formal Academic Qualifications & Certifications:
+                    </span>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        placeholder="e.g. Ph.D. in Computer Science, M.Tech, AWS Certified"
+                        value={newQualText}
+                        onChange={(e) => setNewQualText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddQual();
+                          }
+                        }}
+                        className="flex-1 px-3 py-2 rounded-xl glass-input text-xs font-semibold"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddQual}
+                        className="py-2 px-3 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs flex items-center gap-1 shadow-sm transition-all"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Add Qual</span>
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {editQualsList.length === 0 ? (
+                        <p className="text-xs text-slate-400 italic">No formal qualifications entered.</p>
+                      ) : (
+                        editQualsList.map((q, qIdx) => (
+                          <div
+                            key={qIdx}
+                            className="px-2.5 py-1 rounded-xl bg-purple-500/10 text-purple-700 dark:text-purple-300 border border-purple-500/20 text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <Award className="w-3 h-3 text-purple-500" />
+                            <span>{q}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveQual(qIdx)}
+                              className="text-slate-400 hover:text-red-500 transition-colors ml-1"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 {/* Section: SUBJECTS AND SEMESTERS ASSIGNED TO THIS TEACHER */}
                 <div className="border-t border-slate-200/50 dark:border-slate-800/80 pt-4 space-y-4">
                   <div className="flex items-center justify-between">
@@ -1830,6 +2077,91 @@ export const ProfilesModule: React.FC = () => {
                       {personAssignments.reduce((acc, a) => acc + (a.required_periods || 4), 0)} Periods/wk
                     </span>
                   </div>
+                </div>
+
+                {/* Skills & Qualifications Section in Overview View */}
+                <div className="p-4 rounded-2xl glass-panel border border-white/40 dark:border-white/10 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-amber-500" />
+                      <span>Skills & Qualifications</span>
+                    </h4>
+                    <button
+                      onClick={() => setIsEditingInModal(true)}
+                      className="text-xs font-bold text-blue-500 hover:underline flex items-center gap-1"
+                    >
+                      <Edit2 className="w-3 h-3" />
+                      <span>Edit Skills</span>
+                    </button>
+                  </div>
+
+                  {/* Skills Grid */}
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                      Verified Skills ({selectedPerson.skills?.length || 0})
+                    </span>
+                    {(!selectedPerson.skills || selectedPerson.skills.length === 0) ? (
+                      <p className="text-xs text-slate-400 italic">No skills registered.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {selectedPerson.skills.map((sk, idx) => (
+                          <div
+                            key={idx}
+                            className="px-2.5 py-1 rounded-xl glass-card border border-white/40 dark:border-white/10 text-xs flex items-center gap-1.5"
+                          >
+                            <span className="font-bold text-slate-800 dark:text-slate-200">{sk.name}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold uppercase ${
+                              sk.level === 'Expert' ? 'bg-purple-500/15 text-purple-600 dark:text-purple-400' :
+                              sk.level === 'Advanced' ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400' :
+                              'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                            }`}>
+                              {sk.level}
+                            </span>
+                            <span className="text-[10px] text-slate-400">{sk.years}y</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Qualifications Grid */}
+                  {selectedPerson.qualifications && selectedPerson.qualifications.length > 0 && (
+                    <div className="pt-2 border-t border-slate-200/40 dark:border-slate-800/40">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                        Formal Qualifications
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {selectedPerson.qualifications.map((q, idx) => (
+                          <div
+                            key={idx}
+                            className="px-2.5 py-1 rounded-xl bg-purple-500/10 text-purple-700 dark:text-purple-300 border border-purple-500/20 text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <Award className="w-3 h-3 text-purple-500" />
+                            <span>{q}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Inferred Skills */}
+                  {selectedPerson.inferred_skills && selectedPerson.inferred_skills.length > 0 && (
+                    <div className="pt-2 border-t border-slate-200/40 dark:border-slate-800/40">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                        Inferred Capabilities (AI Skill Engine)
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {selectedPerson.inferred_skills.map((inf, idx) => (
+                          <span
+                            key={idx}
+                            className="px-2 py-0.5 rounded-lg bg-slate-100/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 text-[11px] font-medium border border-slate-200/50 dark:border-slate-700/50"
+                          >
+                            {inf.name} ({Math.round(inf.confidence * 100)}%)
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Collapsible Semester Sections */}

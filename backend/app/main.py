@@ -515,12 +515,16 @@ def seed_subjects_if_needed():
     try:
         colleges = db.query(Organization).filter(Organization.type.in_(["college", "university"])).all()
         for col in colleges:
-            # 1. Seed Semesters if needed
+            # 1. Seed All 8 Semesters (S1 to S8: Odd and Even)
             sem_data = [
                 ("Semester 1", "S1", "2026-2027"),
+                ("Semester 2", "S2", "2026-2027"),
                 ("Semester 3", "S3", "2026-2027"),
+                ("Semester 4", "S4", "2026-2027"),
                 ("Semester 5", "S5", "2026-2027"),
+                ("Semester 6", "S6", "2026-2027"),
                 ("Semester 7", "S7", "2026-2027"),
+                ("Semester 8", "S8", "2026-2027"),
             ]
             sem_map = {}
             for s_name, s_code, a_yr in sem_data:
@@ -538,20 +542,35 @@ def seed_subjects_if_needed():
                 sem_map[s_code] = sem.id
             db.commit()
 
-            # 2. Seed Subjects if needed
-            if db.query(Subject).filter(Subject.org_id == col.id).count() == 0:
-                cse_dept = db.query(Department).filter(Department.org_id == col.id, Department.code == "CSE").first()
-                c_id = cse_dept.id if cse_dept else None
-                default_subs = [
-                    ("Database Management Systems", "CS301", "S5", "CSE-A", 4.0, False, "Core relational databases, SQL, and normalization."),
-                    ("Data Structures & Algorithms", "CS201", "S3", "CSE-A", 4.0, False, "Linear & non-linear structures, algorithmic complexity."),
-                    ("Computer Networks", "CS302", "S5", "CSE-B", 4.0, False, "OSI stack, TCP/IP routing, network security."),
-                    ("Artificial Intelligence & ML", "CS401", "S7", "CSE-A", 4.0, False, "Search heuristics, supervised learning, neural nets."),
-                    ("Operating Systems", "CS303", "S5", "CSE-A", 4.0, False, "Kernel architectures, concurrency, memory paging."),
-                    ("Python Programming Lab", "CS202L", "S3", "CSE-B", 2.0, True, "Hands-on scripting, data pipelines, automation."),
-                    ("Database Systems Practical Lab", "CS304L", "S5", "CSE-A", 2.0, True, "Practical PostgreSQL query tuning and transactions.")
-                ]
-                for name, code, sem_code, cname, hrs, is_lab, desc in default_subs:
+            # 2. Seed Subjects across all 8 Semesters if needed
+            cse_dept = db.query(Department).filter(Department.org_id == col.id, Department.code == "CSE").first()
+            c_id = cse_dept.id if cse_dept else None
+            default_subs = [
+                # Odd Semesters (S1, S3, S5, S7)
+                ("Engineering Mathematics I", "MAT101", "S1", "CSE-A", 4.0, False, "Linear algebra, calculus, and differential equations."),
+                ("Basics of Computing", "CS101", "S1", "CSE-A", 3.0, False, "Introductory computing and C programming foundations."),
+                ("Data Structures & Algorithms", "CS201", "S3", "CSE-A", 4.0, False, "Linear & non-linear structures, algorithmic complexity."),
+                ("Python Programming Lab", "CS202L", "S3", "CSE-B", 2.0, True, "Hands-on scripting, data pipelines, automation."),
+                ("Database Management Systems", "CS301", "S5", "CSE-A", 4.0, False, "Core relational databases, SQL, and normalization."),
+                ("Computer Networks", "CS302", "S5", "CSE-B", 4.0, False, "OSI stack, TCP/IP routing, network security."),
+                ("Operating Systems", "CS303", "S5", "CSE-A", 4.0, False, "Kernel architectures, concurrency, memory paging."),
+                ("Database Systems Practical Lab", "CS304L", "S5", "CSE-A", 2.0, True, "Practical PostgreSQL query tuning and transactions."),
+                ("Artificial Intelligence & ML", "CS401", "S7", "CSE-A", 4.0, False, "Search heuristics, supervised learning, neural nets."),
+                ("Cloud Computing & DevOps", "CS402", "S7", "CSE-A", 3.0, False, "Containers, CI/CD, distributed cloud infrastructure."),
+                # Even Semesters (S2, S4, S6, S8)
+                ("Object Oriented Programming", "CS102", "S2", "CSE-A", 4.0, False, "OOP paradigms in Java, polymorphism, interfaces."),
+                ("OOP Practical Laboratory", "CS102L", "S2", "CSE-A", 2.0, True, "Java and C++ application implementation laboratory."),
+                ("Microprocessors & Microcontrollers", "CS203", "S4", "CSE-A", 4.0, False, "x86 architecture, assembly language, interrupt handling."),
+                ("Design & Analysis of Algorithms", "CS204", "S4", "CSE-A", 4.0, False, "Divide-and-conquer, greedy, dynamic programming."),
+                ("Compiler Design", "CS306", "S6", "CSE-A", 4.0, False, "Lexical analysis, parsing, syntax-directed translation."),
+                ("Web Technologies", "CS307", "S6", "CSE-B", 4.0, False, "Modern full-stack web architectures, REST APIs."),
+                ("Web Applications Lab", "CS307L", "S6", "CSE-B", 2.0, True, "Full-stack frontend and backend application laboratory."),
+                ("Distributed Systems", "CS403", "S8", "CSE-A", 4.0, False, "Consensus, Paxos/Raft, fault tolerance, replication."),
+                ("Capstone Project Phase II", "CS404P", "S8", "CSE-A", 4.0, True, "Final year engineering major project dissertation.")
+            ]
+            existing_sub_names = {s.name.lower() for s in db.query(Subject.name).filter(Subject.org_id == col.id).all()}
+            for name, code, sem_code, cname, hrs, is_lab, desc in default_subs:
+                if name.lower() not in existing_sub_names:
                     sub = Subject(
                         org_id=col.id,
                         department_id=c_id,
@@ -565,7 +584,8 @@ def seed_subjects_if_needed():
                         description=desc
                     )
                     db.add(sub)
-                db.commit()
+                    existing_sub_names.add(name.lower())
+            db.commit()
 
             # 3. Ensure all subjects have semester_id populated
             subs = db.query(Subject).filter(Subject.org_id == col.id).all()
@@ -574,22 +594,35 @@ def seed_subjects_if_needed():
                     s.semester_id = sem_map[s.semester]
             db.commit()
 
-            # 4. Seed TeacherSubjectAssignments if none exist
-            if db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == col.id).count() == 0:
+            # 4. Seed TeacherSubjectAssignments across Odd & Even semesters
+            existing_tsa = db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == col.id).count()
+            if existing_tsa < 8:
                 people = {p.name: p for p in db.query(Person).filter(Person.org_id == col.id).all()}
                 sub_dict = {s.name: s for s in subs}
                 faculty_assignments = [
+                    # Odd Semesters
                     ("Dr. Eleanor Vance", "Database Management Systems", "S5", "CSE-A", 4.0),
+                    ("Dr. Eleanor Vance", "Artificial Intelligence & ML", "S7", "CSE-A", 4.0),
                     ("Dr. Anita Roy", "Computer Networks", "S5", "CSE-B", 4.0),
                     ("Dr. Anita Roy", "Operating Systems", "S5", "CSE-A", 4.0),
                     ("Marcus Thorne", "Python Programming Lab", "S3", "CSE-B", 2.0),
                     ("Priya Nair", "Database Systems Practical Lab", "S5", "CSE-A", 2.0),
                     ("Dr. Rajesh Kumar", "Data Structures & Algorithms", "S3", "CSE-A", 4.0),
+                    # Even Semesters
+                    ("Dr. Eleanor Vance", "Distributed Systems", "S8", "CSE-A", 4.0),
+                    ("Dr. Anita Roy", "Compiler Design", "S6", "CSE-A", 4.0),
+                    ("Dr. Rajesh Kumar", "Design & Analysis of Algorithms", "S4", "CSE-A", 4.0),
+                    ("Marcus Thorne", "OOP Practical Laboratory", "S2", "CSE-A", 2.0),
+                    ("Priya Nair", "Web Applications Lab", "S6", "CSE-B", 2.0),
                 ]
+                existing_pairs = {
+                    (tsa.person_id, tsa.subject_id, tsa.semester)
+                    for tsa in db.query(TeacherSubjectAssignment).filter(TeacherSubjectAssignment.org_id == col.id).all()
+                }
                 for t_name, s_name, sem_code, cname, hrs in faculty_assignments:
                     t = people.get(t_name)
                     s = sub_dict.get(s_name)
-                    if t and s:
+                    if t and s and (t.id, s.id, sem_code) not in existing_pairs:
                         tsa = TeacherSubjectAssignment(
                             org_id=col.id,
                             person_id=t.id,
@@ -602,6 +635,7 @@ def seed_subjects_if_needed():
                             is_primary=True
                         )
                         db.add(tsa)
+                        existing_pairs.add((t.id, s.id, sem_code))
                 db.commit()
 
             # 5. Link existing slots to subjects and populate metadata

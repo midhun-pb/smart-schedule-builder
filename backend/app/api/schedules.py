@@ -6,8 +6,9 @@ from app.core.database import get_db
 from app.models.models import (
     Organization, Schedule, RequirementSlot, Assignment, Person, Resource,
     Department, LeaveRequest, ScheduleVersion, AuditLog, Notification,
-    Holiday, HolidayException, Subject, Semester, TeacherSubjectAssignment
+    Holiday, HolidayException, Subject, Semester, TeacherSubjectAssignment, User
 )
+from app.api.auth import get_current_user
 from app.schemas.schemas import (
     ScheduleGenerateRequest, SlotCreate, SlotUpdate,
     AssignmentUpdate, DragDropAssignRequest, CopyWeekRequest,
@@ -125,6 +126,8 @@ def get_schedule_details(schedule_id: int, db: Session = Depends(get_db)):
 
         # Fallbacks to profession_metadata
         prof_meta = s.profession_metadata or {}
+        if not subject_code and prof_meta.get("subject_code"):
+            subject_code = prof_meta.get("subject_code")
         if not semester_val:
             semester_val = prof_meta.get("semester")
         if not class_val:
@@ -775,18 +778,31 @@ def ensure_comprehensive_slots_for_schedule(
             dept = next((d for d in departments if d.id == p.department_id), None)
             dept_prefix = f"{dept.code} - " if dept and dept.code else ""
 
-            claimed_sub_ids = {w["subject_id"] for w in workload_items if w.get("subject_id")}
-            dept_subs = [s for s in subjects if s.department_id == p.department_id and s.id not in claimed_sub_ids]
-            sub = dept_subs[0] if dept_subs else None
+            # Distinguish faculty from general employees
+            role_l = (p.role_title or "").lower()
+            faculty_keywords = ["professor", "lecturer", "faculty", "teacher", "instructor", "dean", "hod", "chair", "tutor", "fellow"]
+            non_teaching_keywords = ["clerk", "accountant", "security", "driver", "librarian", "technician", "attendant", "peon", "support", "maintenance", "warden", "receptionist", "custodian", "officer", "nurse", "operator", "admin"]
+            is_faculty = any(fk in role_l for fk in faculty_keywords) or (isinstance(p.profession_metadata, dict) and p.profession_metadata.get("is_faculty") is True)
+            if not is_faculty and org.type in ["college", "university"] and not any(ntk in role_l for ntk in non_teaching_keywords):
+                is_faculty = True
 
-            sub_name = sub.name if sub else (f"{p.name} Lecture" if org.type == "college" else f"{p.name} Shift")
-            sub_code = sub.code if sub else "DUTY"
-            sub_sem = sub.semester if sub else ((p.profession_metadata or {}).get("semester", "General") if isinstance(p.profession_metadata, dict) else "General")
+            if is_faculty and org.type in ["college", "university"]:
+                claimed_sub_ids = {w["subject_id"] for w in workload_items if w.get("subject_id")}
+                dept_subs = [s for s in subjects if s.department_id == p.department_id and s.id not in claimed_sub_ids]
+                sub = dept_subs[0] if dept_subs else None
+                sub_name = sub.name if sub else f"{p.name} Academic Lecture"
+                sub_code = sub.code if sub else "ACAD"
+                sub_sem = sub.semester if sub else ((p.profession_metadata or {}).get("semester", "S1") if isinstance(p.profession_metadata, dict) else "S1")
+                c_name = f"{dept_prefix}{sub_sem}" if sub else f"{dept_prefix}{p.name} Class"
+            else:
+                sub = None
+                sub_name = f"{p.role_title or 'Staff'} Operational Shift"
+                sub_code = "OPS"
+                sub_sem = "General"
+                c_name = f"{dept_prefix}Operations"
 
             max_hrs = p.max_hours_per_week or 40.0
             req_periods = max(2, min(5, round(max_hrs / 8.0)))
-
-            c_name = f"{dept_prefix}{sub_sem}" if sub else f"{dept_prefix}{p.name} Cohort"
 
             workload_items.append({
                 "person_id": p.id,
@@ -1143,10 +1159,13 @@ def update_assignment_manual(assignment_id: int, payload: AssignmentUpdate, db: 
     return {"success": True, "assignment": assign}
 
 @router.post("/{schedule_id}/publish")
-def publish_schedule(schedule_id: int, db: Session = Depends(get_db)):
+def publish_schedule(schedule_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     sched = db.query(Schedule).filter(Schedule.id == schedule_id).first()
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
+
+    if current_user.role not in ["admin", "manager"]:
+        raise HTTPException(status_code=403, detail="Only managers and administrators can publish schedules.")
 
     sched.status = "published"
     audit = AuditLog(
